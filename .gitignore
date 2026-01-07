@@ -97,3 +97,5 @@ backend/data/processed/
 temp/
 tmp/
 *.temp
+temp_cells.txt
+nul
