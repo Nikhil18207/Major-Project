@@ -7,9 +7,48 @@ A state-of-the-art AI system that automatically generates clinical radiology rep
 This project introduces several novel research contributions:
 
 1. **HAQT-ARR Architecture**: Hierarchical anatomical query tokens with spatial priors and adaptive region routing
-2. **Curriculum Learning Strategy**: Progressive 4-stage training from simple to complex cases
-3. **Novel Loss Functions**: Clinical entity loss, anatomical consistency loss, region-aware focal loss
-4. **Clinical Validation Framework**: Automated clinical accuracy assessment with entity extraction
+2. **Image-Conditioned Spatial Prior Refinement**: Dynamic per-image refinement of anatomical priors (NEW)
+3. **Curriculum Learning Strategy**: Progressive 4-stage training from simple to complex cases
+4. **Novel Loss Functions**: Clinical entity loss with negation detection, anatomical consistency loss, region-aware focal loss
+5. **Clinical Validation Framework**: Negation-aware clinical accuracy assessment with entity extraction
+
+## Novelty Differentiation from Prior Work
+
+| Feature | R2Gen | ORGAN | MAIRA-Seg | A3Net | **HAQT-ARR (Ours)** |
+|---------|-------|-------|-----------|-------|---------------------|
+| Anatomical Queries | ✗ | ✓ (GNN) | ✓ (Seg) | ✓ (Dict) | **✓ (Learnable)** |
+| Spatial Priors | ✗ | ✗ | Hard Masks | ✗ | **Soft 2D Gaussian** |
+| Image-Conditioned Priors | ✗ | ✗ | ✗ | ✗ | **✓ (Per-image)** |
+| Requires Segmentation | ✗ | ✗ | ✓ | ✗ | **✗** |
+| Cross-Region Modeling | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Curriculum Learning | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Negation-Aware Validation | ✗ | ✗ | ✗ | ✗ | **✓** |
+
+### Key Differentiators:
+
+1. **vs R2Gen (EMNLP 2020)**: R2Gen uses memory-driven generation without anatomical awareness. We add hierarchical anatomical queries with learnable spatial priors.
+
+2. **vs ORGAN (ACL 2023)**: ORGAN uses GNN for organ importance. We use lightweight adaptive routing without graph structure, plus image-conditioned prior refinement.
+
+3. **vs MAIRA-Seg (2023)**: MAIRA requires segmentation masks at inference. Our approach learns soft spatial priors end-to-end - NO segmentation needed.
+
+4. **vs A3Net (2023)**: A3Net uses fixed anatomical knowledge dictionaries. Our queries are fully learnable and adapt per-image via the prior refinement module.
+
+### What Makes HAQT-ARR Novel:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  NOVEL: Image-Conditioned Spatial Prior Refinement         │
+│  ──────────────────────────────────────────────────────────│
+│  Static Gaussian Priors  →  Visual Features  →  Refined   │
+│  (Anatomical Init)          (Per-Image)        Priors     │
+│                                                            │
+│  This allows the model to:                                 │
+│  • Adapt to patient-specific anatomy                       │
+│  • Handle anatomical variations (e.g., cardiomegaly)       │
+│  • Focus on abnormal regions dynamically                   │
+└────────────────────────────────────────────────────────────┘
+```
 
 ## Architecture Overview
 

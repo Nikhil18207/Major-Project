@@ -233,22 +233,65 @@ def get_gpu_temperature(device_id: int = 0) -> Optional[int]:
             return None
 
 
+# Default temperature thresholds (can be overridden via config)
+DEFAULT_MAX_TEMP = 95  # RTX 4060 max safe temp
+DEFAULT_WARNING_TEMP = 85
+DEFAULT_PAUSE_TEMP = 90
+
+# GPU-specific temperature presets
+GPU_TEMP_PRESETS = {
+    'rtx_4060': {'max': 95, 'warning': 85, 'pause': 90},  # RTX 4060 can handle up to 95°C
+    'rtx_4070': {'max': 95, 'warning': 85, 'pause': 90},
+    'rtx_4080': {'max': 95, 'warning': 85, 'pause': 90},
+    'rtx_4090': {'max': 95, 'warning': 85, 'pause': 90},
+    'rtx_3080': {'max': 93, 'warning': 83, 'pause': 88},
+    'rtx_3090': {'max': 93, 'warning': 83, 'pause': 88},
+    'default': {'max': 95, 'warning': 85, 'pause': 90},
+}
+
+
+def get_gpu_temp_preset(gpu_name: str = None) -> dict:
+    """
+    Get temperature preset for GPU.
+
+    Args:
+        gpu_name: GPU name (auto-detected if None)
+
+    Returns:
+        Dict with 'max', 'warning', 'pause' temperatures
+    """
+    if gpu_name is None and torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0).lower()
+
+    if gpu_name:
+        for key in GPU_TEMP_PRESETS:
+            if key != 'default' and key.replace('_', ' ') in gpu_name.lower():
+                return GPU_TEMP_PRESETS[key]
+
+    return GPU_TEMP_PRESETS['default']
+
+
 def check_gpu_health(
-    max_temp: int = 83,
-    warning_temp: int = 75,
+    max_temp: int = None,
+    warning_temp: int = None,
     device_id: int = 0
-) -> tuple[bool, str]:
+) -> tuple:
     """
     Check GPU health and temperature.
-    
+
     Args:
-        max_temp: Maximum safe temperature (Celsius) - RTX 4060 throttle at 83C
-        warning_temp: Warning temperature (Celsius)
+        max_temp: Maximum safe temperature (Celsius). Auto-detected if None.
+        warning_temp: Warning temperature (Celsius). Auto-detected if None.
         device_id: GPU device ID
-        
+
     Returns:
         (is_safe, message) tuple
     """
+    # Auto-detect temperature thresholds if not provided
+    if max_temp is None or warning_temp is None:
+        preset = get_gpu_temp_preset()
+        max_temp = max_temp or preset['max']
+        warning_temp = warning_temp or preset['warning']
     if not torch.cuda.is_available():
         return True, "CUDA not available"
     

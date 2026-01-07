@@ -123,41 +123,111 @@ class AnatomicalConsistencyLoss(nn.Module):
 
 class ClinicalEntityLoss(nn.Module):
     """
-    NOVEL: Clinical Entity Loss
-    
+    NOVEL: Clinical Entity Loss with Negation Detection
+
     Encourages the model to detect and mention important clinical findings.
     This loss extracts clinical entities from the generated text and compares
-    them with entities in the reference text.
-    
+    them with entities in the reference text, WITH NEGATION AWARENESS.
+
     This is novel because:
     - Standard NLG losses (BLEU, ROUGE) don't explicitly model clinical entities
     - We create a structured loss that encourages clinical accuracy
+    - We handle negation (e.g., "no cardiomegaly" vs "cardiomegaly present")
     - Can be combined with standard cross-entropy for better clinical performance
     """
-    
+
     def __init__(self, weight: float = 0.2):
         super().__init__()
         self.weight = weight
-        
-        # Common clinical findings in chest X-rays
+
+        # Common clinical findings in chest X-rays (deduplicated)
         self.clinical_entities = [
             'cardiomegaly', 'pneumonia', 'effusion', 'edema', 'consolidation',
             'atelectasis', 'pneumothorax', 'infiltrate', 'mass', 'nodule',
-            'pleural', 'opacity', 'clear', 'normal', 'acute', 'chronic',
-            'enlarged', 'calcification', 'fibrosis', 'fracture', 'pneumothorax',
-            'cardiomegaly', 'pneumonia', 'pleural effusion', 'pulmonary edema'
+            'pleural thickening', 'opacity', 'fibrosis', 'fracture',
+            'pleural effusion', 'pulmonary edema', 'emphysema', 'hernia',
+            'pneumoperitoneum', 'calcification', 'tortuous aorta', 'scoliosis'
         ]
-    
-    def extract_entities(self, text: str) -> set:
-        """Extract clinical entities from text."""
+
+        # Negation patterns for clinical text
+        self.negation_patterns = [
+            'no ', 'no evidence of ', 'without ', 'negative for ',
+            'absence of ', 'absent ', 'not ', 'denies ', 'ruled out ',
+            'no acute ', 'no significant ', 'no definite ', 'no obvious ',
+            'unremarkable', 'clear', 'normal', 'resolved', 'improved',
+            'no longer', 'cleared', 'resolution of'
+        ]
+
+        # Positive indicators
+        self.positive_patterns = [
+            'present', 'noted', 'seen', 'identified', 'consistent with',
+            'suggestive of', 'suspicious for', 'compatible with', 'evidence of',
+            'demonstrates', 'shows', 'reveals', 'confirmed', 'new ', 'worsening',
+            'increased', 'enlarged', 'developing', 'progression'
+        ]
+
+    def _is_negated(self, text: str, entity: str, entity_pos: int) -> bool:
+        """
+        Check if an entity mention is negated.
+
+        Args:
+            text: Full text (lowercase)
+            entity: Entity being checked
+            entity_pos: Position of entity in text
+
+        Returns:
+            True if the entity is negated
+        """
+        # Check window before entity (50 chars)
+        window_start = max(0, entity_pos - 50)
+        context_before = text[window_start:entity_pos]
+
+        # Check if any negation pattern appears before entity
+        for neg_pattern in self.negation_patterns:
+            if neg_pattern in context_before:
+                # Make sure there's no positive pattern after negation
+                neg_pos = context_before.rfind(neg_pattern)
+                text_after_neg = context_before[neg_pos + len(neg_pattern):]
+
+                # If no positive pattern between negation and entity, it's negated
+                has_positive = any(pos in text_after_neg for pos in self.positive_patterns)
+                if not has_positive:
+                    return True
+
+        return False
+
+    def extract_entities(self, text: str) -> tuple:
+        """
+        Extract clinical entities from text with negation awareness.
+
+        Returns:
+            Tuple of (positive_entities, negated_entities)
+        """
         text_lower = text.lower()
-        found_entities = set()
-        
+        positive_entities = set()
+        negated_entities = set()
+
         for entity in self.clinical_entities:
-            if entity in text_lower:
-                found_entities.add(entity)
-        
-        return found_entities
+            # Find all occurrences of entity
+            start = 0
+            while True:
+                pos = text_lower.find(entity, start)
+                if pos == -1:
+                    break
+
+                # Check if this mention is negated
+                if self._is_negated(text_lower, entity, pos):
+                    negated_entities.add(entity)
+                else:
+                    positive_entities.add(entity)
+
+                start = pos + len(entity)
+
+        # Remove entities that appear both positive and negated (ambiguous)
+        # Keep positive if it appears positive anywhere
+        negated_entities = negated_entities - positive_entities
+
+        return positive_entities, negated_entities
     
     def forward(
         self,
@@ -165,52 +235,80 @@ class ClinicalEntityLoss(nn.Module):
         reference_texts: List[str],
     ) -> torch.Tensor:
         """
-        Compute clinical entity loss.
-        
+        Compute clinical entity loss with negation-aware matching.
+
         Args:
             generated_texts: List of generated report texts
             reference_texts: List of reference report texts
-            
+
         Returns:
             Entity loss scalar
         """
         if len(generated_texts) == 0:
             return torch.tensor(0.0)
-        
+
         total_loss = 0.0
         num_samples = 0
-        
+
         for gen_text, ref_text in zip(generated_texts, reference_texts):
-            gen_entities = self.extract_entities(gen_text)
-            ref_entities = self.extract_entities(ref_text)
-            
-            if len(ref_entities) == 0:
+            # Extract entities with negation awareness
+            gen_positive, gen_negated = self.extract_entities(gen_text)
+            ref_positive, ref_negated = self.extract_entities(ref_text)
+
+            # Combine all reference entities for counting
+            ref_all = ref_positive | ref_negated
+            if len(ref_all) == 0:
                 continue
-            
-            # Precision: entities correctly identified / total generated entities
-            if len(gen_entities) > 0:
-                precision = len(gen_entities & ref_entities) / len(gen_entities)
+
+            # True positives: correctly identified positive findings
+            tp_positive = len(gen_positive & ref_positive)
+
+            # True negatives (as positives): correctly identified negated findings
+            tp_negated = len(gen_negated & ref_negated)
+
+            # False positives: generated positive but reference negative or absent
+            fp = len(gen_positive - ref_positive)
+
+            # False negatives: reference positive but generated negative or absent
+            fn = len(ref_positive - gen_positive)
+
+            # Critical errors: saying positive when actually negated (dangerous!)
+            critical_errors = len(gen_positive & ref_negated)
+
+            # Total correct = true positives + correctly negated
+            total_correct = tp_positive + tp_negated
+            total_predicted = len(gen_positive) + len(gen_negated)
+            total_reference = len(ref_positive) + len(ref_negated)
+
+            # Precision and recall
+            if total_predicted > 0:
+                precision = total_correct / total_predicted
             else:
                 precision = 0.0
-            
-            # Recall: entities correctly identified / total reference entities
-            recall = len(gen_entities & ref_entities) / len(ref_entities)
-            
+
+            if total_reference > 0:
+                recall = total_correct / total_reference
+            else:
+                recall = 0.0
+
             # F1 score
             if precision + recall > 0:
                 f1 = 2 * precision * recall / (precision + recall)
             else:
                 f1 = 0.0
-            
-            # Loss = 1 - F1 (we want to maximize F1)
-            total_loss += (1.0 - f1)
+
+            # Add penalty for critical errors (saying positive when negated)
+            critical_penalty = 0.5 * critical_errors / max(len(ref_all), 1)
+
+            # Loss = 1 - F1 + critical_penalty
+            sample_loss = (1.0 - f1) + critical_penalty
+            total_loss += sample_loss
             num_samples += 1
-        
+
         if num_samples == 0:
             return torch.tensor(0.0)
-        
+
         avg_loss = total_loss / num_samples
-        # Return as tensor for consistency with other losses
         return torch.tensor(self.weight * avg_loss)
 
 
@@ -433,65 +531,78 @@ class CombinedNovelLoss(nn.Module):
         """
         # Determine device from labels or outputs
         device = labels.device if labels is not None else 'cuda'
-        
+
         losses = {}
-        total_novel_loss = torch.tensor(0.0, device=device, requires_grad=False)
-        
+        loss_components = []  # Collect loss components to sum properly
+
         # Anatomical consistency loss
         if self.use_anatomical_consistency:
             try:
                 spatial_priors = outputs.get('spatial_priors')
                 attention_weights = outputs.get('attention_info', {}).get('region_attention')
                 region_weights = outputs.get('region_weights')
-                
+
                 if spatial_priors is not None and attention_weights is not None:
                     anat_loss = self.anatomical_loss(spatial_priors, attention_weights, region_weights)
                     if torch.is_tensor(anat_loss) and not torch.isnan(anat_loss) and not torch.isinf(anat_loss):
                         losses['anatomical_consistency'] = anat_loss
-                        total_novel_loss = total_novel_loss + anat_loss
+                        if anat_loss.requires_grad:
+                            loss_components.append(anat_loss)
             except Exception as e:
                 logger.debug(f"Anatomical consistency loss error: {e}")
-        
-        # Clinical entity loss
+
+        # Clinical entity loss (non-differentiable, for monitoring only)
         if self.use_clinical_entity and generated_texts is not None and reference_texts is not None:
             try:
                 clinical_loss = self.clinical_loss(generated_texts, reference_texts)
                 if torch.is_tensor(clinical_loss):
-                    losses['clinical_entity'] = clinical_loss
-                    total_novel_loss = total_novel_loss + clinical_loss
+                    losses['clinical_entity'] = clinical_loss.item() if clinical_loss.numel() == 1 else clinical_loss
                 elif isinstance(clinical_loss, (int, float)):
                     losses['clinical_entity'] = clinical_loss
-                    total_novel_loss = total_novel_loss + clinical_loss
+                # Note: Clinical entity loss is computed on text, not differentiable
             except Exception as e:
                 logger.debug(f"Clinical entity loss error: {e}")
-        
-        # Region-aware focal loss
+
+        # Region-aware focal loss (differentiable)
         if self.use_region_focal:
             try:
                 logits = outputs.get('logits')
                 region_weights = outputs.get('region_weights')
-                
+
                 if logits is not None and labels is not None:
                     focal_loss = self.focal_loss(logits, labels, region_weights, pad_token_id)
                     if torch.is_tensor(focal_loss) and not torch.isnan(focal_loss) and not torch.isinf(focal_loss):
                         losses['region_focal'] = focal_loss
-                        total_novel_loss = total_novel_loss + focal_loss
+                        if focal_loss.requires_grad:
+                            loss_components.append(focal_loss)
             except Exception as e:
                 logger.debug(f"Region focal loss error: {e}")
-        
+
         # Cross-modal alignment loss
         if self.use_cross_modal:
             try:
                 visual_features = outputs.get('projected_features')
-                # Get text features from decoder (simplified - would need decoder hidden states)
-                # For now, skip if not available
-                if visual_features is not None:
-                    # This would need decoder hidden states - skipping for now
-                    pass
+                decoder_hidden = outputs.get('decoder_hidden_states')
+
+                if visual_features is not None and decoder_hidden is not None:
+                    # Use last hidden state from decoder
+                    text_features = decoder_hidden[-1] if isinstance(decoder_hidden, tuple) else decoder_hidden
+                    align_loss = self.alignment_loss(visual_features, text_features)
+                    if torch.is_tensor(align_loss) and not torch.isnan(align_loss) and not torch.isinf(align_loss):
+                        losses['cross_modal'] = align_loss
+                        if align_loss.requires_grad:
+                            loss_components.append(align_loss)
             except Exception as e:
                 logger.debug(f"Cross-modal alignment loss error: {e}")
-        
+
+        # Sum loss components properly to maintain gradient flow
+        if loss_components:
+            total_novel_loss = torch.stack(loss_components).sum()
+        else:
+            # Return zero tensor that can still participate in computation graph
+            total_novel_loss = torch.zeros(1, device=device, requires_grad=True).squeeze()
+
         losses['total_novel'] = total_novel_loss
-        
+
         return losses
 

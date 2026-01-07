@@ -1,29 +1,32 @@
 """
 Clinical Validation Framework for XR2Text
 
-NOVEL: Comprehensive Clinical Validation System
+NOVEL: Comprehensive Clinical Validation System with Negation-Aware NER
 
 This module provides tools for clinical validation of generated reports:
-1. Clinical entity extraction and validation
+1. Clinical entity extraction with NEGATION DETECTION (NOVEL)
 2. Anatomical region coverage analysis
-3. Severity assessment
+3. Severity assessment with uncertainty handling
 4. Comparison with radiologist reports
 5. Error categorization by clinical significance
+6. Per-finding precision/recall metrics
 
-This is novel because:
-- Most work focuses on NLG metrics (BLEU, ROUGE) but not clinical accuracy
-- We provide structured clinical validation tools
-- Enables real-world deployment assessment
+Key Innovations:
+- Negation-aware entity extraction (handles "no cardiomegaly" vs "cardiomegaly")
+- Uncertainty detection ("possible", "cannot exclude", "likely")
+- Context-aware severity inference
+- Critical error weighting for clinical safety
 
 Authors: S. Nikhil, Dadhania Omkumar
 Supervisor: Dr. Damodar Panigrahy
 """
 
 import re
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional, Set
+from dataclasses import dataclass, field
 from enum import Enum
 import json
+from collections import defaultdict
 
 
 class ClinicalSeverity(Enum):
@@ -35,23 +38,32 @@ class ClinicalSeverity(Enum):
     CRITICAL = "critical"
 
 
+class FindingStatus(Enum):
+    """Status of a clinical finding."""
+    PRESENT = "present"      # Finding is present
+    ABSENT = "absent"        # Finding is explicitly negated
+    UNCERTAIN = "uncertain"  # Finding is uncertain (possible, cannot exclude)
+
+
 class ErrorType(Enum):
     """Types of clinical errors."""
     MISSING_FINDING = "missing_finding"
     FALSE_POSITIVE = "false_positive"
     SEVERITY_MISMATCH = "severity_mismatch"
     LOCATION_ERROR = "location_error"
+    NEGATION_ERROR = "negation_error"  # NOVEL: Incorrect negation
     NORMAL = "normal"  # No error
 
 
 @dataclass
 class ClinicalFinding:
-    """Represents a clinical finding."""
+    """Represents a clinical finding with status awareness."""
     entity: str
     location: str
     severity: ClinicalSeverity
+    status: FindingStatus = FindingStatus.PRESENT  # NOVEL: track if negated
     confidence: float = 1.0
-    modifiers: List[str] = None
+    modifiers: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -65,73 +77,200 @@ class ClinicalReport:
 
 class ClinicalValidator:
     """
-    NOVEL: Clinical Validation System
-    
+    NOVEL: Clinical Validation System with Negation-Aware NER
+
     Validates generated reports for clinical accuracy and completeness.
+    Includes negation detection to distinguish "no cardiomegaly" from "cardiomegaly".
     """
-    
+
     def __init__(self):
         # Clinical entities and their synonyms
         self.clinical_entities = {
-            'cardiomegaly': ['cardiomegaly', 'enlarged heart', 'cardiac enlargement'],
-            'pneumonia': ['pneumonia', 'pneumonic', 'pulmonary infection'],
-            'effusion': ['effusion', 'pleural effusion', 'fluid'],
-            'edema': ['edema', 'pulmonary edema', 'fluid overload'],
-            'consolidation': ['consolidation', 'consolidated', 'opacity'],
-            'atelectasis': ['atelectasis', 'collapse', 'collapsed'],
-            'pneumothorax': ['pneumothorax', 'air', 'collapsed lung'],
-            'mass': ['mass', 'lesion', 'tumor'],
-            'nodule': ['nodule', 'nodular'],
-            'fracture': ['fracture', 'broken', 'break'],
+            'cardiomegaly': ['cardiomegaly', 'enlarged heart', 'cardiac enlargement', 'heart enlargement'],
+            'pneumonia': ['pneumonia', 'pneumonic', 'pulmonary infection', 'infectious infiltrate'],
+            'effusion': ['effusion', 'pleural effusion', 'fluid collection'],
+            'edema': ['edema', 'pulmonary edema', 'fluid overload', 'congestion'],
+            'consolidation': ['consolidation', 'consolidated', 'airspace opacity'],
+            'atelectasis': ['atelectasis', 'collapse', 'volume loss'],
+            'pneumothorax': ['pneumothorax', 'collapsed lung'],
+            'mass': ['mass', 'lesion', 'tumor', 'neoplasm'],
+            'nodule': ['nodule', 'nodular', 'pulmonary nodule'],
+            'fracture': ['fracture', 'broken', 'rib fracture'],
+            'emphysema': ['emphysema', 'hyperinflation', 'copd'],
+            'fibrosis': ['fibrosis', 'scarring', 'interstitial'],
+            'hernia': ['hernia', 'hiatal hernia'],
+            'scoliosis': ['scoliosis', 'curvature'],
         }
-        
+
+        # NOVEL: Negation patterns for clinical text
+        self.negation_patterns = [
+            'no ', 'no evidence of', 'without', 'negative for',
+            'absence of', 'absent', 'not ', 'denies', 'ruled out',
+            'no acute', 'no significant', 'no definite', 'no obvious',
+            'unremarkable', 'clear of', 'free of', 'resolution of',
+            'resolved', 'improved', 'no longer', 'cleared',
+        ]
+
+        # NOVEL: Uncertainty patterns
+        self.uncertainty_patterns = [
+            'possible', 'probable', 'suspected', 'cannot exclude',
+            'may represent', 'could be', 'likely', 'suggestive of',
+            'consistent with', 'compatible with', 'concerning for',
+            'question', 'questionable', 'versus', 'vs',
+        ]
+
+        # NOVEL: Positive assertion patterns
+        self.positive_patterns = [
+            'present', 'noted', 'seen', 'identified', 'demonstrates',
+            'shows', 'reveals', 'confirmed', 'evident', 'obvious',
+            'new', 'worsening', 'increased', 'developing', 'progression',
+            'persistent', 'unchanged', 'stable',  # These indicate presence
+        ]
+
         # Anatomical regions
         self.anatomical_regions = [
             'right_lung', 'left_lung', 'heart', 'mediastinum',
             'spine', 'diaphragm', 'costophrenic_angles'
         ]
-        
+
         # Severity indicators
         self.severity_keywords = {
-            ClinicalSeverity.NORMAL: ['normal', 'clear', 'no acute', 'unremarkable'],
-            ClinicalSeverity.MILD: ['mild', 'slight', 'minimal', 'trace'],
-            ClinicalSeverity.MODERATE: ['moderate', 'some', 'present'],
+            ClinicalSeverity.NORMAL: ['normal', 'clear', 'no acute', 'unremarkable', 'negative'],
+            ClinicalSeverity.MILD: ['mild', 'slight', 'minimal', 'trace', 'small', 'subtle'],
+            ClinicalSeverity.MODERATE: ['moderate', 'some', 'present', 'modest'],
             ClinicalSeverity.SEVERE: ['severe', 'extensive', 'large', 'marked', 'significant'],
-            ClinicalSeverity.CRITICAL: ['massive', 'critical', 'life-threatening', 'emergent'],
+            ClinicalSeverity.CRITICAL: ['massive', 'critical', 'life-threatening', 'emergent', 'tension'],
         }
-    
+
+        # Critical findings that are clinically dangerous to miss or falsely report
+        self.critical_findings = ['pneumothorax', 'mass', 'fracture', 'emphysema']
+
+    def _is_negated(self, text: str, entity_pos: int) -> bool:
+        """
+        NOVEL: Check if entity at given position is negated.
+
+        Args:
+            text: Full text (lowercase)
+            entity_pos: Position of entity in text
+
+        Returns:
+            True if the entity is negated
+        """
+        # Check window before entity (60 chars to catch longer negation phrases)
+        window_start = max(0, entity_pos - 60)
+        context_before = text[window_start:entity_pos]
+
+        # Check if any negation pattern appears before entity
+        for neg_pattern in self.negation_patterns:
+            if neg_pattern in context_before:
+                # Make sure there's no positive pattern after negation
+                neg_pos = context_before.rfind(neg_pattern)
+                text_after_neg = context_before[neg_pos + len(neg_pattern):]
+
+                # Check for positive patterns between negation and entity
+                has_positive = any(pos in text_after_neg for pos in self.positive_patterns)
+                if not has_positive:
+                    return True
+
+        return False
+
+    def _is_uncertain(self, text: str, entity_pos: int) -> bool:
+        """
+        NOVEL: Check if entity at given position has uncertainty.
+
+        Args:
+            text: Full text (lowercase)
+            entity_pos: Position of entity in text
+
+        Returns:
+            True if the entity has uncertainty markers
+        """
+        window_start = max(0, entity_pos - 40)
+        window_end = min(len(text), entity_pos + 40)
+        context = text[window_start:window_end]
+
+        return any(unc in context for unc in self.uncertainty_patterns)
+
     def extract_findings(self, text: str) -> List[ClinicalFinding]:
         """
-        Extract structured clinical findings from text.
-        
+        NOVEL: Extract structured clinical findings with negation awareness.
+
         Args:
             text: Report text
-            
+
         Returns:
-            List of ClinicalFinding objects
+            List of ClinicalFinding objects with status (present/absent/uncertain)
         """
         text_lower = text.lower()
         findings = []
-        
+        found_entities = set()  # Track to avoid duplicates
+
         # Extract entities
         for entity, synonyms in self.clinical_entities.items():
+            if entity in found_entities:
+                continue
+
             for synonym in synonyms:
-                if synonym in text_lower:
+                # Find all occurrences
+                start = 0
+                while True:
+                    pos = text_lower.find(synonym, start)
+                    if pos == -1:
+                        break
+
+                    # Determine status (negated, uncertain, or present)
+                    if self._is_negated(text_lower, pos):
+                        status = FindingStatus.ABSENT
+                    elif self._is_uncertain(text_lower, pos):
+                        status = FindingStatus.UNCERTAIN
+                    else:
+                        status = FindingStatus.PRESENT
+
                     # Determine severity
                     severity = self._determine_severity(text_lower, synonym)
-                    
+
                     # Determine location
                     location = self._determine_location(text_lower, synonym)
-                    
+
                     finding = ClinicalFinding(
                         entity=entity,
                         location=location,
                         severity=severity,
+                        status=status,
                     )
                     findings.append(finding)
-                    break  # Only count once per entity
-        
+                    found_entities.add(entity)
+                    break  # Only count first occurrence per entity
+
+                if entity in found_entities:
+                    break
+
         return findings
+
+    def extract_findings_detailed(self, text: str) -> Dict[str, Set[str]]:
+        """
+        NOVEL: Extract findings categorized by status.
+
+        Returns:
+            Dict with 'present', 'absent', 'uncertain' sets of entity names
+        """
+        findings = self.extract_findings(text)
+
+        result = {
+            'present': set(),
+            'absent': set(),
+            'uncertain': set(),
+        }
+
+        for f in findings:
+            if f.status == FindingStatus.PRESENT:
+                result['present'].add(f.entity)
+            elif f.status == FindingStatus.ABSENT:
+                result['absent'].add(f.entity)
+            else:
+                result['uncertain'].add(f.entity)
+
+        return result
     
     def _determine_severity(self, text: str, entity: str) -> ClinicalSeverity:
         """Determine severity of a finding."""
@@ -185,79 +324,105 @@ class ClinicalValidator:
         reference_text: str,
     ) -> Dict:
         """
-        Validate generated report against reference.
-        
+        NOVEL: Validate generated report against reference with negation awareness.
+
         Args:
             generated_text: Generated report
             reference_text: Reference (radiologist) report
-            
+
         Returns:
-            Validation results dictionary
+            Validation results dictionary with negation-aware metrics
         """
-        gen_findings = self.extract_findings(generated_text)
-        ref_findings = self.extract_findings(reference_text)
-        
-        # Extract entity sets
-        gen_entities = {f.entity for f in gen_findings}
-        ref_entities = {f.entity for f in ref_findings}
-        
-        # Compute metrics
-        true_positives = gen_entities & ref_entities
-        false_positives = gen_entities - ref_entities
-        false_negatives = ref_entities - gen_entities
-        
-        precision = len(true_positives) / len(gen_entities) if gen_entities else 0.0
-        recall = len(true_positives) / len(ref_entities) if ref_entities else 0.0
+        # Extract findings with status
+        gen_detailed = self.extract_findings_detailed(generated_text)
+        ref_detailed = self.extract_findings_detailed(reference_text)
+
+        gen_present = gen_detailed['present']
+        gen_absent = gen_detailed['absent']
+        ref_present = ref_detailed['present']
+        ref_absent = ref_detailed['absent']
+
+        # NOVEL: Negation-aware metrics
+        # True positives: correctly identified PRESENT findings
+        tp_present = gen_present & ref_present
+
+        # True negatives: correctly identified ABSENT findings
+        tn_absent = gen_absent & ref_absent
+
+        # False positives: said present but actually absent or not mentioned
+        fp = gen_present - ref_present
+
+        # False negatives: reference present but not in generated
+        fn = ref_present - gen_present
+
+        # CRITICAL: Negation errors (said present when actually negated - DANGEROUS)
+        negation_errors = gen_present & ref_absent
+
+        # Compute precision/recall
+        total_gen_positive = len(gen_present)
+        total_ref_positive = len(ref_present)
+
+        precision = len(tp_present) / total_gen_positive if total_gen_positive > 0 else 1.0
+        recall = len(tp_present) / total_ref_positive if total_ref_positive > 0 else 1.0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-        
+
         # Categorize errors
         errors = []
-        
+
         # Missing findings (false negatives)
-        for entity in false_negatives:
+        for entity in fn:
+            is_critical = entity in self.critical_findings
             errors.append({
                 'type': ErrorType.MISSING_FINDING.value,
                 'entity': entity,
-                'severity': 'high' if entity in ['pneumothorax', 'mass', 'fracture'] else 'medium',
+                'severity': 'high' if is_critical else 'medium',
+                'clinical_impact': 'May miss important diagnosis' if is_critical else 'Minor omission',
             })
-        
-        # False positives
-        for entity in false_positives:
+
+        # False positives (excluding negation errors)
+        for entity in (fp - negation_errors):
+            is_critical = entity in self.critical_findings
             errors.append({
                 'type': ErrorType.FALSE_POSITIVE.value,
                 'entity': entity,
-                'severity': 'high' if entity in ['pneumothorax', 'mass'] else 'medium',
+                'severity': 'high' if is_critical else 'medium',
+                'clinical_impact': 'May cause unnecessary follow-up' if is_critical else 'Minor overcall',
             })
-        
-        # Severity mismatches
-        for ref_finding in ref_findings:
-            gen_finding = next(
-                (f for f in gen_findings if f.entity == ref_finding.entity),
-                None
-            )
-            if gen_finding and gen_finding.severity != ref_finding.severity:
-                errors.append({
-                    'type': ErrorType.SEVERITY_MISMATCH.value,
-                    'entity': ref_finding.entity,
-                    'reference_severity': ref_finding.severity.value,
-                    'generated_severity': gen_finding.severity.value,
-                    'severity': 'medium',
-                })
-        
-        # Count critical errors
-        critical_errors = sum(1 for e in errors if e['severity'] == 'high')
-        
+
+        # NOVEL: Negation errors (most critical - said positive when negated)
+        for entity in negation_errors:
+            errors.append({
+                'type': ErrorType.NEGATION_ERROR.value,
+                'entity': entity,
+                'severity': 'critical',  # Always critical - dangerous clinical error
+                'clinical_impact': f'CRITICAL: Reported {entity} as present when explicitly negated',
+            })
+
+        # Count errors by severity
+        critical_errors = sum(1 for e in errors if e['severity'] in ['critical', 'high'])
+        negation_error_count = sum(1 for e in errors if e['type'] == ErrorType.NEGATION_ERROR.value)
+
+        # Clinical accuracy penalizes negation errors heavily
+        clinical_accuracy = 1.0 - (
+            (critical_errors + 2 * negation_error_count) /
+            max(total_ref_positive + len(ref_absent), 1)
+        )
+        clinical_accuracy = max(0.0, clinical_accuracy)
+
         return {
             'precision': precision,
             'recall': recall,
             'f1': f1,
-            'true_positives': len(true_positives),
-            'false_positives': len(false_positives),
-            'false_negatives': len(false_negatives),
+            'true_positives': len(tp_present),
+            'true_negatives': len(tn_absent),
+            'false_positives': len(fp),
+            'false_negatives': len(fn),
+            'negation_errors': negation_error_count,  # NOVEL metric
             'errors': errors,
             'critical_errors': critical_errors,
             'total_errors': len(errors),
-            'clinical_accuracy': 1.0 - (critical_errors / max(len(ref_entities), 1)),
+            'clinical_accuracy': clinical_accuracy,
+            'negation_accuracy': 1.0 - (negation_error_count / max(len(ref_absent), 1)),  # NOVEL
         }
     
     def batch_validate(

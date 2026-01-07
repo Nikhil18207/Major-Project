@@ -42,7 +42,7 @@ from ..utils.device import (
 from ..utils.logger import TrainingLogger
 from .scheduler import get_scheduler
 from .losses import CombinedNovelLoss
-from .curriculum import AnatomicalCurriculumScheduler, create_curriculum_dataloader
+from .curriculum import AnatomicalCurriculumScheduler, CurriculumDataset, create_curriculum_dataloader
 from ..utils.clinical_validator import ClinicalValidator
 
 
@@ -85,6 +85,11 @@ class XR2TextTrainer:
         # Data loaders
         self.train_loader = train_loader
         self.val_loader = val_loader
+
+        # Store base dataset and loader config for curriculum learning
+        self.base_train_dataset = train_loader.dataset
+        self.train_batch_size = train_loader.batch_size
+        self.train_num_workers = train_loader.num_workers if hasattr(train_loader, 'num_workers') else 0
 
         # Training settings
         self.epochs = config.get("epochs", 50)
@@ -276,14 +281,33 @@ class XR2TextTrainer:
         for epoch in range(self.current_epoch, self.epochs):
             self.current_epoch = epoch
 
+            # NOVEL: Update curriculum learning - filter samples based on epoch
+            if self.use_curriculum:
+                stage_name = self.curriculum_scheduler.get_stage_name(epoch)
+                curriculum_dataset = CurriculumDataset(
+                    base_dataset=self.base_train_dataset,
+                    curriculum_scheduler=self.curriculum_scheduler,
+                    current_epoch=epoch,
+                )
+                self.train_loader = DataLoader(
+                    curriculum_dataset,
+                    batch_size=self.train_batch_size,
+                    shuffle=True,
+                    num_workers=self.train_num_workers,
+                    pin_memory=True,
+                    drop_last=True,
+                )
+                logger.info(f"Curriculum stage: {stage_name} ({len(curriculum_dataset)}/{len(self.base_train_dataset)} samples)")
+
             # Update scheduled sampling ratio (silent)
             self._update_scheduled_sampling_ratio(epoch)
 
             # Training phase
             train_loss = self._train_epoch()
 
-            # Validation phase - only every 5 epochs for speed
-            if (epoch + 1) % 5 == 0 or (epoch + 1) == self.epochs:
+            # Validation phase - configurable frequency (default every 2 epochs)
+            validate_every = self.config.get('validate_every', 2)
+            if (epoch + 1) % validate_every == 0 or (epoch + 1) == self.epochs:
                 val_loss, val_metrics = self._validate()
 
                 # Log epoch summary (single line)
@@ -303,7 +327,7 @@ class XR2TextTrainer:
                 # Skip validation, just log training loss
                 logger.info(
                     f"Epoch {epoch+1}/{self.epochs} | "
-                    f"Train: {train_loss:.4f} | Val: SKIPPED (validating every 5 epochs)"
+                    f"Train: {train_loss:.4f} | Val: SKIPPED (validating every {validate_every} epochs)"
                 )
                 val_metrics = {}
                 val_loss = 0.0
@@ -327,6 +351,10 @@ class XR2TextTrainer:
             if self.patience_counter >= self.patience:
                 self.training_logger.log_early_stop(epoch + 1, self.patience)
                 break
+
+            # Clear CUDA cache periodically to prevent OOM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Final checkpoint
         self._save_checkpoint("final_model.pt")
@@ -448,6 +476,11 @@ class XR2TextTrainer:
                 })
 
         progress_bar.close()
+
+        # Clear cache after training epoch to free memory for validation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return total_loss / num_batches
 
     @torch.no_grad()
@@ -458,8 +491,9 @@ class XR2TextTrainer:
         all_predictions = []
         all_references = []
 
-        # Use only 25% of validation data for speed (still ~191 batches)
-        max_val_batches = len(self.val_loader) // 4
+        # Use 25% of validation data for speed (configurable)
+        val_fraction = self.config.get('val_fraction', 0.25)
+        max_val_batches = max(1, int(len(self.val_loader) * val_fraction))
 
         progress_bar = tqdm(
             self.val_loader,
@@ -501,17 +535,31 @@ class XR2TextTrainer:
 
             total_loss += outputs["loss"].item()
 
-            # Generate predictions for metrics
+            # Generate predictions for metrics - OPTIMIZED for faster validation
+            # Use fewer beams during training validation (2 instead of 5)
+            # Full beam search can be used during final evaluation
+            gen_config = self.config.get('generation', {})
+            val_num_beams = gen_config.get('val_num_beams', 2)  # Faster validation
+
             _, generated_texts, _ = self.model.generate(
                 images=images,
-                max_length=256,
-                num_beams=4,
+                max_length=gen_config.get('max_length', 256),
+                min_length=gen_config.get('min_length', 20),
+                num_beams=val_num_beams,  # Use fewer beams for speed
+                length_penalty=gen_config.get('length_penalty', 1.0),
+                repetition_penalty=gen_config.get('repetition_penalty', 1.1),
+                no_repeat_ngram_size=gen_config.get('no_repeat_ngram_size', 3),
+                early_stopping=True,  # Stop when all beams finish
             )
 
             all_predictions.extend(generated_texts)
             all_references.extend(raw_texts)
 
         progress_bar.close()
+
+        # Clear cache after validation generation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Compute metrics (use actual number of batches processed)
         val_loss = total_loss / max_val_batches
