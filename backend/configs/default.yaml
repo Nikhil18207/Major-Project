@@ -1,0 +1,157 @@
+# XR2Text Default Configuration with HAQT-ARR (Novel)
+# =====================================================
+# Authors: S. Nikhil, Dadhania Omkumar
+# Supervisor: Dr. Damodar Panigrahy
+
+# Model Configuration
+model:
+  image_size: 384
+  freeze_encoder: false
+  use_anatomical_attention: true  # Enable HAQT-ARR (Novel)
+
+  encoder:
+    model_name: "base"  # tiny, small, base, large
+    pretrained: true
+    freeze_layers: 0
+    output_dim: 1024
+    drop_rate: 0.1
+    attn_drop_rate: 0.1
+
+  # HAQT-ARR Projection Layer (Novel Contribution)
+  projection:
+    language_dim: 768
+    # HAQT-ARR specific parameters
+    num_regions: 7              # 7 anatomical regions
+    num_global_queries: 8       # Global context queries
+    num_region_queries: 4       # Queries per anatomical region (total: 8 + 7*4 = 36)
+    num_attention_heads: 8
+    num_cross_region_layers: 2  # Cross-region interaction layers
+    feature_size: 12            # 384/32 = 12x12 patch grid
+    dropout: 0.1
+    # Novel components
+    use_spatial_priors: true    # Learnable 2D Gaussian priors
+    use_adaptive_routing: true  # Dynamic region importance
+    use_cross_region: true      # Cross-region interaction
+    # Standard projection parameters (used if use_anatomical_attention: false)
+    num_projection_layers: 2
+    num_queries: 32
+    use_cross_attention: true
+    use_residual: true
+
+  decoder:
+    model_name: "biobart"  # biobart, distilgpt2, gpt2
+    max_length: 512
+    freeze_embeddings: false
+    freeze_layers: 0
+    use_cache: true
+    dropout: 0.1
+
+# Training Configuration
+training:
+  epochs: 50
+  batch_size: 4  # Reduced for RTX 4060 (8GB) with HAQT-ARR
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  gradient_accumulation_steps: 8  # Effective batch size = 4 * 8 = 32
+  max_grad_norm: 1.0
+  use_amp: true  # Mixed precision for RTX 4060
+
+  # Scheduler
+  scheduler: "cosine"  # linear, cosine, cosine_restarts, polynomial
+
+  # Early stopping (increased patience for better convergence)
+  patience: 15  # Increased from 5 for more training iterations
+
+  # Label smoothing for regularization (Novel improvement)
+  label_smoothing: 0.1  # Reduces overconfident predictions
+  
+  # Scheduled sampling for improved generation (Novel improvement)
+  use_scheduled_sampling: true
+  scheduled_sampling_start: 1.0   # Start with 100% teacher forcing
+  scheduled_sampling_end: 0.5     # End with 50% teacher forcing
+  scheduled_sampling_warmup: 5    # Warmup epochs before decay
+  
+  # Region weight regularization for balanced anatomical attention
+  use_region_regularization: true
+  region_regularization_weight: 0.01  # Entropy-based regularization
+  
+  # NOVEL: Novel loss functions
+  use_novel_losses: true
+  use_anatomical_consistency_loss: true
+  use_clinical_entity_loss: true
+  use_region_focal_loss: true
+  use_cross_modal_loss: false  # Requires decoder hidden states
+  anatomical_loss_weight: 0.1
+  clinical_loss_weight: 0.2
+  focal_loss_weight: 0.15
+  alignment_loss_weight: 0.1
+  
+  # NOVEL: Curriculum learning
+  use_curriculum_learning: true
+  
+  # NOVEL: Clinical validation
+  use_clinical_validation: true
+
+  # GPU Temperature Monitoring (for RTX 4060 safety)
+  enable_temp_monitoring: true
+  max_gpu_temp: 83        # RTX 4060 throttle temperature
+  warning_gpu_temp: 75    # Warning threshold
+  pause_gpu_temp: 80     # Pause training threshold
+  temp_check_interval: 10 # Check every 10 batches
+  gpu_cooldown_time: 30   # Wait 30 seconds when paused
+
+  # Checkpointing
+  checkpoint_dir: "checkpoints"
+  save_every: 5
+
+  # Logging
+  log_every: 100
+  experiment_name: "xr2text_haqt_arr"
+
+# Data Configuration
+data:
+  dataset: "itsanmolgupta/mimic-cxr-dataset"
+  image_size: 384
+  max_length: 256
+  target_type: "both"  # findings, impression, both
+  num_workers: 2  # Reduced for stability
+  pin_memory: true
+  prefetch_factor: 2
+
+# Generation Configuration
+generation:
+  max_length: 256
+  min_length: 20
+  num_beams: 4
+  temperature: 1.0
+  top_k: 50
+  top_p: 0.95
+  repetition_penalty: 1.2
+  length_penalty: 1.0
+  no_repeat_ngram_size: 3
+  early_stopping: true
+  do_sample: false
+
+# API Configuration
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  reload: false
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  log_to_file: true
+  log_to_console: true
+
+# Anatomical Regions (for reference)
+# - right_lung: Right lung field (upper, middle, lower lobes)
+# - left_lung: Left lung field (upper, lower lobes)
+# - heart: Cardiac silhouette
+# - mediastinum: Mediastinal structures
+# - spine: Thoracic spine
+# - diaphragm: Hemidiaphragms (bilateral)
+# - costophrenic_angles: CP angles (bilateral)

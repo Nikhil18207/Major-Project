@@ -1,0 +1,169 @@
+# XR2Text Safe Configuration for RTX 4060 Laptop GPU
+# =====================================================
+# Optimized to prevent overheating and ensure stable training
+# Authors: S. Nikhil, Dadhania Omkumar
+# Supervisor: Dr. Damodar Panigrahy
+
+# Model Configuration
+model:
+  image_size: 384
+  freeze_encoder: false
+  use_anatomical_attention: true  # Enable HAQT-ARR (Novel)
+
+  encoder:
+    model_name: "base"  # tiny, small, base, large
+    pretrained: true
+    freeze_layers: 0
+    output_dim: 1024
+    drop_rate: 0.1
+    attn_drop_rate: 0.1
+
+  # HAQT-ARR Projection Layer (Novel Contribution)
+  projection:
+    language_dim: 768
+    num_regions: 7
+    num_global_queries: 8
+    num_region_queries: 4
+    num_attention_heads: 8
+    num_cross_region_layers: 2
+    feature_size: 12
+    dropout: 0.1
+    use_spatial_priors: true
+    use_adaptive_routing: true
+    use_cross_region: true
+    num_projection_layers: 2
+    num_queries: 32
+    use_cross_attention: true
+    use_residual: true
+
+  decoder:
+    model_name: "biobart"
+    max_length: 512
+    freeze_embeddings: false
+    freeze_layers: 0
+    use_cache: true
+    dropout: 0.1
+
+# Training Configuration - SAFE FOR RTX 4060
+training:
+  epochs: 30  # Reduced for laptop GPU
+  batch_size: 2  # VERY CONSERVATIVE for 8GB VRAM + temperature safety
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  gradient_accumulation_steps: 16  # Effective batch size = 2 * 16 = 32
+  max_grad_norm: 1.0
+  use_amp: true  # ESSENTIAL - Mixed precision reduces memory and heat
+
+  scheduler: "cosine"
+  
+  patience: 15
+  
+  label_smoothing: 0.1
+  
+  use_scheduled_sampling: true
+  scheduled_sampling_start: 1.0
+  scheduled_sampling_end: 0.5
+  scheduled_sampling_warmup: 3
+  
+  use_region_regularization: true
+  region_regularization_weight: 0.01
+  
+  # NOVEL: Novel loss functions (can disable to reduce compute/heat)
+  use_novel_losses: true
+  use_anatomical_consistency_loss: true
+  use_clinical_entity_loss: true
+  use_region_focal_loss: true
+  use_cross_modal_loss: false
+  anatomical_loss_weight: 0.1
+  clinical_loss_weight: 0.2
+  focal_loss_weight: 0.15
+  alignment_loss_weight: 0.1
+  
+  # NOVEL: Curriculum learning
+  use_curriculum_learning: true
+  
+  # NOVEL: Clinical validation
+  use_clinical_validation: true
+
+  # GPU Temperature Monitoring (CRITICAL FOR RTX 4060)
+  enable_temp_monitoring: true
+  max_gpu_temp: 83        # RTX 4060 throttle temperature
+  warning_gpu_temp: 75   # Warning threshold
+  pause_gpu_temp: 80      # Pause training threshold (conservative)
+  temp_check_interval: 10 # Check every 10 batches
+  gpu_cooldown_time: 45   # Wait 45 seconds when paused (longer for safety)
+
+  checkpoint_dir: "checkpoints"
+  save_every: 3
+  log_every: 50
+  experiment_name: "xr2text_haqt_arr_rtx4060_safe"
+
+# Data Configuration
+data:
+  dataset: "itsanmolgupta/mimic-cxr-dataset"
+  image_size: 384
+  max_length: 256
+  target_type: "both"
+  num_workers: 2  # Reduced to save CPU/RAM
+  pin_memory: true
+  prefetch_factor: 2
+
+# Generation Configuration
+generation:
+  max_length: 256
+  min_length: 20
+  num_beams: 4
+  temperature: 1.0
+  top_k: 50
+  top_p: 0.95
+  repetition_penalty: 1.2
+  length_penalty: 1.0
+  no_repeat_ngram_size: 3
+  early_stopping: true
+  do_sample: false
+
+# API Configuration
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  reload: false
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  log_to_file: true
+  log_to_console: true
+
+# ============================================
+# RTX 4060 SAFETY NOTES:
+# ============================================
+# 1. Batch size is set to 2 (very conservative)
+#    - If you get OOM errors, reduce to 1
+#    - If temperature stays low (<70°C), can try batch_size: 3
+#
+# 2. Temperature monitoring will automatically:
+#    - Warn at 75°C
+#    - Pause training at 80°C
+#    - Stop if reaches 83°C (throttle temp)
+#
+# 3. If overheating occurs:
+#    - Reduce batch_size to 1
+#    - Increase gradient_accumulation_steps to 32
+#    - Disable novel losses temporarily
+#    - Ensure laptop has good ventilation
+#    - Consider using a cooling pad
+#
+# 4. Monitor GPU temperature:
+#    - Check nvidia-smi periodically
+#    - Training will log temperature every 10 batches
+#    - Watch for repeated pauses (indicates need for adjustment)
+#
+# 5. Performance tips:
+#    - Keep laptop elevated for better airflow
+#    - Close other GPU-intensive applications
+#    - Use Windows "High Performance" power plan
+#    - Consider reducing image_size to 256 if needed
+

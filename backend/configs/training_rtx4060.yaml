@@ -1,0 +1,117 @@
+# XR2Text Training Configuration for RTX 4060 (8GB VRAM) with HAQT-ARR
+# ======================================================================
+# Optimized settings for NVIDIA GeForce RTX 4060 with novel HAQT-ARR
+# Authors: S. Nikhil, Dadhania Omkumar
+# Supervisor: Dr. Damodar Panigrahy
+
+# Model Configuration
+model:
+  image_size: 384  # Balanced size for quality and memory
+  freeze_encoder: false
+  use_anatomical_attention: true  # Enable HAQT-ARR (Novel)
+
+  encoder:
+    model_name: "base"
+    pretrained: true
+    freeze_layers: 2  # Freeze first 2 layers to save memory
+    output_dim: 1024
+    drop_rate: 0.1
+    attn_drop_rate: 0.1
+
+  # HAQT-ARR Projection Layer (Novel) - Memory Optimized
+  projection:
+    language_dim: 768
+    # HAQT-ARR parameters
+    num_regions: 7              # 7 anatomical regions
+    num_global_queries: 8       # Global context queries
+    num_region_queries: 4       # Queries per region (total: 36 queries)
+    num_attention_heads: 8
+    num_cross_region_layers: 2  # Cross-region interaction
+    feature_size: 12            # 12x12 patch grid
+    dropout: 0.1
+    # Novel components
+    use_spatial_priors: true    # Learnable Gaussian priors
+    use_adaptive_routing: true  # Dynamic region weighting
+    use_cross_region: true      # Cross-region dependencies
+    # Standard params (if HAQT-ARR disabled)
+    num_projection_layers: 2
+    num_queries: 32
+    use_cross_attention: true
+    use_residual: true
+
+  decoder:
+    model_name: "biobart"
+    max_length: 256  # Reduced for memory
+    freeze_embeddings: false
+    freeze_layers: 2  # Freeze first 2 decoder layers
+    use_cache: false  # Disable KV cache during training
+    dropout: 0.1
+
+# Training Configuration - Optimized for RTX 4060 with Novel Improvements
+training:
+  epochs: 30
+  batch_size: 4  # Small batch for 8GB VRAM with HAQT-ARR
+  learning_rate: 5.0e-5  # Lower LR for stability
+  weight_decay: 0.01
+  warmup_steps: 500
+  gradient_accumulation_steps: 8  # Effective batch size = 4 * 8 = 32
+  max_grad_norm: 1.0
+  use_amp: true  # Essential for RTX 4060
+
+  scheduler: "cosine"
+  
+  # Early stopping - Set to 999 to ensure ALL 30 epochs run
+  patience: 999  # Disabled early stopping to complete full training
+  
+  # Label smoothing for regularization (Novel improvement)
+  label_smoothing: 0.1  # Reduces overconfident predictions
+  
+  # Scheduled sampling for improved generation (Novel improvement)
+  use_scheduled_sampling: true
+  scheduled_sampling_start: 1.0   # Start with 100% teacher forcing
+  scheduled_sampling_end: 0.5     # End with 50% teacher forcing
+  scheduled_sampling_warmup: 3    # Warmup epochs before decay (shorter for 30 epochs)
+  
+  # Region weight regularization for balanced anatomical attention
+  use_region_regularization: true
+  region_regularization_weight: 0.01  # Entropy-based regularization
+  
+  checkpoint_dir: "checkpoints"
+  save_every: 3
+  log_every: 50
+  experiment_name: "xr2text_haqt_arr_rtx4060"
+
+  # Temperature monitoring - pause only at 90°C (very high threshold)
+  enable_temp_monitoring: true
+  max_gpu_temp: 90
+  warning_gpu_temp: 85
+  pause_gpu_temp: 90
+
+# Data Configuration
+data:
+  dataset: "itsanmolgupta/mimic-cxr-dataset"
+  image_size: 384
+  max_length: 256
+  target_type: "both"
+  num_workers: 2  # Reduce workers to save RAM
+  pin_memory: true
+  prefetch_factor: 2
+
+# Generation Configuration
+generation:
+  max_length: 256
+  min_length: 20
+  num_beams: 4
+  temperature: 1.0
+  repetition_penalty: 1.2
+  no_repeat_ngram_size: 3
+  early_stopping: true
+  do_sample: false
+
+# Memory Optimization Tips for RTX 4060:
+# - Use batch_size: 4 with gradient_accumulation_steps: 8
+# - Enable use_amp: true for mixed precision
+# - Freeze encoder layers (freeze_layers: 2)
+# - Reduce max_length to 256
+# - Disable decoder KV cache during training
+# - Use num_workers: 2 for data loading

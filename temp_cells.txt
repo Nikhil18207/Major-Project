@@ -1,0 +1,48 @@
+=== Cell 16 ===
+# Show sample predictions vs ground truth
+print("Sample Predictions vs Ground Truth:")
+print("=" * 80)
+
+for i in range(min(5, len(predictions))):
+    print(f"\n--- Sample {i+1} ---")
+    print(f"\nGround Truth:")
+    print(references[i][:500] + "..." if len(references[i]) > 500 else references[i])
+    print(f"\nGenerated:")
+    print(predictions[i][:500] + "..." if len(predictions[i]) > 500 else predictions[i])
+    print("-" * 80)
+
+=== Cell 18 ===
+# Best results
+best_epoch = np.argmax([h['bleu_4'] + h['rouge_l'] for h in [dict(zip(history.keys(), v)) for v in zip(*history.values())]])
+
+print("=" * 60)
+print("TRAINING RESULTS SUMMARY")
+print("=" * 60)
+print(f"\nBest Epoch: {best_epoch + 1}")
+print(f"\nBest Metrics:")
+print(f"  BLEU-1: {history['bleu_1'][best_epoch]:.4f}")
+print(f"  BLEU-2: {history['bleu_2'][best_epoch]:.4f}")
+print(f"  BLEU-3: {history['bleu_3'][best_epoch]:.4f}")
+print(f"  BLEU-4: {history['bleu_4'][best_epoch]:.4f}")
+print(f"  ROUGE-1: {history['rouge_1'][best_epoch]:.4f}")
+print(f"  ROUGE-2: {history['rouge_2'][best_epoch]:.4f}")
+print(f"  ROUGE-L: {history['rouge_l'][best_epoch]:.4f}")
+print(f"\nFinal Train Loss: {history['train_loss'][-1]:.4f}")
+print(f"Final Val Loss: {history['val_loss'][-1]:.4f}")
+
+# Save results table
+results_table = pd.DataFrame({
+    'Metric': ['BLEU-1', 'BLEU-2', 'BLEU-3', 'BLEU-4', 'ROUGE-1', 'ROUGE-2', 'ROUGE-L'],
+    'Score': [
+        history['bleu_1'][best_epoch],
+        history['bleu_2'][best_epoch],
+        history['bleu_3'][best_epoch],
+        history['bleu_4'][best_epoch],
+        history['rouge_1'][best_epoch],
+        history['rouge_2'][best_epoch],
+        history['rouge_l'][best_epoch],
+    ]
+})
+results_table.to_csv('../data/statistics/best_results.csv', index=False)
+print("\nResults saved to ../data/statistics/best_results.csv")
+

@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+swin/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+backend/notebooks/*_output.ipynb
+
+# PyTorch
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+!checkpoints/.gitkeep
+
+# Data
+*.csv
+*.json
+*.pickle
+*.pkl
+data/
+datasets/
+!backend/data/statistics/.gitkeep
+*.hdf5
+*.h5
+
+# Logs
+*.log
+logs/
+wandb/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+
+# Cache
+.cache/
+*.cache
+.huggingface/
+
+# Node modules (frontend)
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.next/
+frontend/out/
+
+# System files
+Thumbs.db
+.DS_Store
+*.bak
+*.tmp
+
+# Large model files
+*.bin
+*.safetensors
+models/
+
+# Dataset cache
+backend/data/raw/
+backend/data/processed/
+*.arrow
+*.parquet
+
+# Temporary files
+temp/
+tmp/
+*.temp
