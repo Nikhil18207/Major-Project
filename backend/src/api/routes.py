@@ -33,6 +33,14 @@ from ..data.transforms import get_val_transforms, XRayTransform
 
 router = APIRouter()
 
+# ============================================
+# Configuration Constants
+# ============================================
+MAX_FILE_SIZE_MB = 50  # Maximum file size in MB
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_BATCH_SIZE = 10  # Maximum images in batch request
+ALLOWED_CONTENT_TYPES = ["image/png", "image/jpeg", "image/jpg", "image/webp"]
+
 
 # ============================================
 # Pydantic Models for Request/Response
@@ -57,11 +65,30 @@ class GeneratedReport(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    """Request model for radiologist feedback."""
-    original_report: str = Field(..., description="Original AI-generated report")
-    corrected_report: str = Field(..., description="Radiologist-corrected report")
-    image_id: Optional[str] = Field(None, description="Optional image identifier")
-    feedback_notes: Optional[str] = Field(None, description="Additional feedback notes")
+    """Request model for radiologist feedback with validation."""
+    original_report: str = Field(
+        ...,
+        description="Original AI-generated report",
+        min_length=1,
+        max_length=10000,
+    )
+    corrected_report: str = Field(
+        ...,
+        description="Radiologist-corrected report",
+        min_length=1,
+        max_length=10000,
+    )
+    image_id: Optional[str] = Field(
+        None,
+        description="Optional image identifier",
+        max_length=100,
+        pattern=r'^[a-zA-Z0-9_\-\.]*$',  # Only alphanumeric, underscore, hyphen, dot
+    )
+    feedback_notes: Optional[str] = Field(
+        None,
+        description="Additional feedback notes",
+        max_length=5000,
+    )
 
 
 class FeedbackResponse(BaseModel):
@@ -109,16 +136,21 @@ async def generate_report(file: UploadFile = File(...)):
 
     try:
         # Validate file type
-        if not file.content_type.startswith("image/"):
+        if file.content_type not in ALLOWED_CONTENT_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid file type: {file.content_type}. Expected image/*"
+                detail=f"Invalid file type: {file.content_type}. Allowed: {', '.join(ALLOWED_CONTENT_TYPES)}"
             )
 
-        # Read and process image
+        # Read and validate file size
         start_time = time.time()
-
         contents = await file.read()
+
+        if len(contents) > MAX_FILE_SIZE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size: {MAX_FILE_SIZE_MB}MB"
+            )
         image = Image.open(io.BytesIO(contents)).convert("RGB")
 
         # Apply transforms
@@ -183,8 +215,29 @@ async def generate_report_base64(request: ReportGenerationRequest):
         if "," in image_data:
             image_data = image_data.split(",")[1]
 
-        image_bytes = base64.b64decode(image_data)
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        try:
+            image_bytes = base64.b64decode(image_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 encoding: {e}")
+
+        # Validate decoded image size (same as file upload)
+        if len(image_bytes) > MAX_FILE_SIZE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Image too large. Maximum size is {MAX_FILE_SIZE_MB}MB"
+            )
+
+        # Validate image can be opened
+        try:
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid image data: {e}")
+
+        # Validate image dimensions (sanity check)
+        if image.width < 32 or image.height < 32:
+            raise HTTPException(status_code=400, detail="Image too small. Minimum 32x32 pixels.")
+        if image.width > 8192 or image.height > 8192:
+            raise HTTPException(status_code=400, detail="Image too large. Maximum 8192x8192 pixels.")
 
         # Apply transforms
         transform = XRayTransform(get_val_transforms(384))
@@ -236,10 +289,21 @@ async def generate_reports_batch(files: List[UploadFile] = File(...)):
     Generate reports for multiple X-ray images in batch.
 
     Processes multiple images in a single request for efficiency.
+    Maximum {MAX_BATCH_SIZE} images per request.
     """
     from .main import get_model, get_device_instance
 
     try:
+        # Validate batch size
+        if len(files) > MAX_BATCH_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many files. Maximum batch size: {MAX_BATCH_SIZE}"
+            )
+
+        if len(files) == 0:
+            raise HTTPException(status_code=400, detail="No files provided")
+
         start_time = time.time()
 
         # Process all images
@@ -247,13 +311,20 @@ async def generate_reports_batch(files: List[UploadFile] = File(...)):
         image_tensors = []
 
         for file in files:
-            if not file.content_type.startswith("image/"):
+            if file.content_type not in ALLOWED_CONTENT_TYPES:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid file type for {file.filename}"
+                    detail=f"Invalid file type for {file.filename}: {file.content_type}"
                 )
 
             contents = await file.read()
+
+            # Validate file size
+            if len(contents) > MAX_FILE_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File {file.filename} too large. Maximum: {MAX_FILE_SIZE_MB}MB"
+                )
             image = Image.open(io.BytesIO(contents)).convert("RGB")
             image_tensor = transform(image)
             image_tensors.append(image_tensor)
@@ -300,50 +371,101 @@ async def generate_reports_batch(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def sanitize_text(text: str) -> str:
+    """
+    Sanitize text input to prevent injection attacks.
+
+    Removes or escapes potentially dangerous characters while
+    preserving medical terminology and formatting.
+    """
+    if text is None:
+        return None
+
+    # Remove null bytes and other control characters (except newlines and tabs)
+    import re
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
+    # Limit consecutive whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r' {3,}', '  ', text)
+
+    return text.strip()
+
+
 @router.post("/feedback", response_model=FeedbackResponse)
 async def submit_feedback(feedback: FeedbackRequest):
     """
     Submit radiologist feedback for human-in-the-loop learning.
 
     Collects corrected reports from radiologists for model improvement.
+    Input is validated via Pydantic and sanitized before storage.
     """
     import uuid
+    import json
+    import re
     from datetime import datetime
 
     try:
-        # Generate feedback ID
-        feedback_id = str(uuid.uuid4())[:8]
+        # Generate secure feedback ID (full UUID for uniqueness)
+        feedback_id = str(uuid.uuid4())
 
-        # Store feedback (in production, save to database)
+        # Sanitize all text inputs
+        sanitized_original = sanitize_text(feedback.original_report)
+        sanitized_corrected = sanitize_text(feedback.corrected_report)
+        sanitized_notes = sanitize_text(feedback.feedback_notes) if feedback.feedback_notes else None
+
+        # Validate image_id format (additional check beyond Pydantic)
+        sanitized_image_id = None
+        if feedback.image_id:
+            # Only allow safe characters in image_id
+            if re.match(r'^[a-zA-Z0-9_\-\.]+$', feedback.image_id):
+                sanitized_image_id = feedback.image_id[:100]  # Truncate to max length
+            else:
+                logger.warning(f"Invalid image_id format rejected: {feedback.image_id[:20]}...")
+
+        # Store feedback with sanitized data
         feedback_data = {
             "id": feedback_id,
             "timestamp": datetime.utcnow().isoformat(),
-            "original_report": feedback.original_report,
-            "corrected_report": feedback.corrected_report,
-            "image_id": feedback.image_id,
-            "notes": feedback.feedback_notes,
+            "original_report": sanitized_original,
+            "corrected_report": sanitized_corrected,
+            "image_id": sanitized_image_id,
+            "notes": sanitized_notes,
+            "metadata": {
+                "original_length": len(feedback.original_report),
+                "corrected_length": len(feedback.corrected_report),
+            }
         }
 
-        # Save to file (in production, use database)
-        feedback_dir = Path("data/feedback")
+        # Secure file path handling - prevent path traversal
+        feedback_dir = Path("data/feedback").resolve()
         feedback_dir.mkdir(parents=True, exist_ok=True)
 
-        feedback_file = feedback_dir / f"{feedback_id}.json"
-        import json
-        with open(feedback_file, "w") as f:
-            json.dump(feedback_data, f, indent=2)
+        # Use only the UUID (already validated) as filename
+        safe_filename = f"{feedback_id}.json"
+        feedback_file = feedback_dir / safe_filename
 
-        logger.info(f"Feedback saved: {feedback_id}")
+        # Verify the file path is within the feedback directory (prevent traversal)
+        if not str(feedback_file.resolve()).startswith(str(feedback_dir)):
+            raise HTTPException(status_code=400, detail="Invalid file path")
+
+        # Write with explicit encoding
+        with open(feedback_file, "w", encoding="utf-8") as f:
+            json.dump(feedback_data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Feedback saved: {feedback_id[:8]}...")
 
         return FeedbackResponse(
             success=True,
             message="Feedback submitted successfully",
-            feedback_id=feedback_id,
+            feedback_id=feedback_id[:8],  # Return shortened ID to user
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Feedback submission failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to save feedback")
 
 
 @router.get("/model/info", response_model=ModelInfo)
@@ -501,26 +623,45 @@ def parse_report_sections(report: str) -> tuple:
     Returns:
         Tuple of (findings, impression) strings
     """
+    import re
+
     findings = None
     impression = None
 
-    report_upper = report.upper()
+    # Use case-insensitive regex for robust parsing
+    # This handles variations like "FINDINGS:", "Findings:", "findings:"
+    findings_pattern = re.compile(r'\bFINDINGS\s*:', re.IGNORECASE)
+    impression_pattern = re.compile(r'\bIMPRESSION\s*:', re.IGNORECASE)
 
-    if "FINDINGS:" in report_upper:
-        parts = report.split("FINDINGS:", 1)
-        if len(parts) > 1:
-            rest = parts[1]
-            if "IMPRESSION:" in rest.upper():
-                findings_part, impression_part = rest.upper().split("IMPRESSION:", 1)
-                findings = rest[:len(findings_part)].strip()
-                impression = rest[len(findings_part) + len("IMPRESSION:"):].strip()
-            else:
-                findings = rest.strip()
+    findings_match = findings_pattern.search(report)
+    impression_match = impression_pattern.search(report)
 
-    elif "IMPRESSION:" in report_upper:
-        parts = report.split("IMPRESSION:", 1)
-        if len(parts) > 1:
-            impression = parts[1].strip()
+    if findings_match and impression_match:
+        # Both sections present
+        if findings_match.start() < impression_match.start():
+            # FINDINGS comes before IMPRESSION
+            findings_start = findings_match.end()
+            findings_end = impression_match.start()
+            impression_start = impression_match.end()
+
+            findings = report[findings_start:findings_end].strip()
+            impression = report[impression_start:].strip()
+        else:
+            # IMPRESSION comes before FINDINGS (unusual but handle it)
+            impression_start = impression_match.end()
+            impression_end = findings_match.start()
+            findings_start = findings_match.end()
+
+            impression = report[impression_start:impression_end].strip()
+            findings = report[findings_start:].strip()
+
+    elif findings_match:
+        # Only FINDINGS section
+        findings = report[findings_match.end():].strip()
+
+    elif impression_match:
+        # Only IMPRESSION section
+        impression = report[impression_match.end():].strip()
 
     else:
         # No explicit sections, treat entire report as findings

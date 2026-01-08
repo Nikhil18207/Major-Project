@@ -44,7 +44,7 @@ model:
     use_cache: true
     dropout: 0.1
 
-# Training Configuration - SAFE FOR RTX 4060
+# Training Configuration - BULLETPROOF FOR RTX 4060 (8GB VRAM)
 training:
   epochs: 30  # Reduced for laptop GPU
   batch_size: 2  # VERY CONSERVATIVE for 8GB VRAM + temperature safety
@@ -56,19 +56,19 @@ training:
   use_amp: true  # ESSENTIAL - Mixed precision reduces memory and heat
 
   scheduler: "cosine"
-  
+
   patience: 15
-  
+
   label_smoothing: 0.1
-  
+
   use_scheduled_sampling: true
   scheduled_sampling_start: 1.0
   scheduled_sampling_end: 0.5
   scheduled_sampling_warmup: 3
-  
+
   use_region_regularization: true
   region_regularization_weight: 0.01
-  
+
   # NOVEL: Novel loss functions (can disable to reduce compute/heat)
   use_novel_losses: true
   use_anatomical_consistency_loss: true
@@ -79,20 +79,29 @@ training:
   clinical_loss_weight: 0.2
   focal_loss_weight: 0.15
   alignment_loss_weight: 0.1
-  
+
   # NOVEL: Curriculum learning
   use_curriculum_learning: true
-  
+
   # NOVEL: Clinical validation
   use_clinical_validation: true
 
-  # GPU Temperature Monitoring (CRITICAL FOR RTX 4060)
+  # GPU Temperature Monitoring (ADJUSTED FOR ACTIVE COOLING)
   enable_temp_monitoring: true
-  max_gpu_temp: 83        # RTX 4060 throttle temperature
-  warning_gpu_temp: 75   # Warning threshold
-  pause_gpu_temp: 80      # Pause training threshold (conservative)
-  temp_check_interval: 10 # Check every 10 batches
-  gpu_cooldown_time: 45   # Wait 45 seconds when paused (longer for safety)
+  max_gpu_temp: 95        # Hard stop temperature (safety limit)
+  warning_gpu_temp: 85    # Warning threshold (just logs, no action)
+  pause_gpu_temp: 90      # Pause training threshold (only if very hot)
+  temp_check_interval: 50 # Check every 50 batches (less frequent)
+  gpu_cooldown_time: 30   # Wait 30 seconds when paused
+
+  # MEMORY OPTIMIZATION (BULLETPROOF OOM PREVENTION)
+  gradient_checkpointing: true  # Enables gradient checkpointing in encoder (saves ~30% VRAM)
+  validate_every: 3  # Validate every 3 epochs instead of every epoch
+  val_fraction: 0.25  # Use only 25% of validation set during training
+
+  # OOM Recovery (NEW)
+  oom_recovery_enabled: true  # Auto-recover from OOM by skipping batch
+  clear_cache_frequency: 100  # Clear CUDA cache every N batches
 
   checkpoint_dir: "checkpoints"
   save_every: 3
@@ -113,7 +122,8 @@ data:
 generation:
   max_length: 256
   min_length: 20
-  num_beams: 4
+  num_beams: 4  # For inference/final evaluation
+  val_num_beams: 2  # REDUCED for validation during training (saves memory)
   temperature: 1.0
   top_k: 50
   top_p: 0.95

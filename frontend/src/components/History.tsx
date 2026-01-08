@@ -10,7 +10,8 @@ import {
   X,
   AlertCircle,
 } from 'lucide-react'
-import { cn } from '../utils/cn'
+// cn utility imported but currently unused - keeping for future styling
+// import { cn } from '../utils/cn'
 import useStore from '../store/useStore'
 import type { ReportHistoryItem } from '../types'
 

@@ -23,8 +23,13 @@ import type {
 
 const API_BASE_URL = '/api/v1'
 
+// Timeout settings for different request types
+const DEFAULT_TIMEOUT = 30000  // 30 seconds for normal requests
+const GENERATION_TIMEOUT = 120000  // 2 minutes for report generation (can be slow on RTX 4060)
+
 const api = axios.create({
   baseURL: API_BASE_URL,
+  timeout: DEFAULT_TIMEOUT,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -61,6 +66,7 @@ export async function generateReport(file: File): Promise<GeneratedReport> {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
+    timeout: GENERATION_TIMEOUT,  // Longer timeout for generation
   })
   return response.data
 }
@@ -80,6 +86,8 @@ export async function generateReportBase64(
     num_beams: options?.numBeams ?? 4,
     temperature: options?.temperature ?? 1.0,
     do_sample: options?.doSample ?? false,
+  }, {
+    timeout: GENERATION_TIMEOUT,  // Longer timeout for generation
   })
   return response.data
 }
@@ -104,6 +112,7 @@ export async function generateReportsBatch(files: File[]): Promise<{
     headers: {
       'Content-Type': 'multipart/form-data',
     },
+    timeout: GENERATION_TIMEOUT * 2,  // Even longer for batch (multiple images)
   })
   return response.data
 }

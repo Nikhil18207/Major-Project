@@ -19,10 +19,12 @@ Supervisor: Dr. Damodar Panigrahy
 """
 
 import os
+import gc
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.cuda.amp import GradScaler, autocast
+# Fix: Use non-deprecated amp imports (PyTorch 2.4+)
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from typing import Optional, Dict, List, Callable
 from pathlib import Path
@@ -44,6 +46,7 @@ from .scheduler import get_scheduler
 from .losses import CombinedNovelLoss
 from .curriculum import AnatomicalCurriculumScheduler, CurriculumDataset, create_curriculum_dataloader
 from ..utils.clinical_validator import ClinicalValidator
+from ..data.dataset import IGNORE_INDEX
 
 
 class XR2TextTrainer:
@@ -81,6 +84,12 @@ class XR2TextTrainer:
 
         # Move model to device
         self.model = model.to(self.device)
+
+        # Enable gradient checkpointing if configured (RTX 4060 memory optimization)
+        if config.get("gradient_checkpointing", False):
+            if hasattr(self.model, 'enable_gradient_checkpointing'):
+                self.model.enable_gradient_checkpointing()
+                logger.info("Gradient checkpointing enabled for memory efficiency")
 
         # Data loaders
         self.train_loader = train_loader
@@ -170,8 +179,12 @@ class XR2TextTrainer:
             num_warmup_steps=self.warmup_steps,
         )
 
-        # Mixed precision scaler
-        self.scaler = GradScaler() if self.use_amp else None
+        # Mixed precision scaler (Fix: specify device for PyTorch 2.4+)
+        self.scaler = GradScaler('cuda') if self.use_amp else None
+
+        # OOM Recovery settings
+        self.oom_recovery_enabled = True
+        self.oom_batch_reduction = 0.5  # Reduce batch by 50% on OOM
 
         # Metrics tracking
         self.metrics_tracker = MetricsTracker()
@@ -381,72 +394,93 @@ class XR2TextTrainer:
 
         self.optimizer.zero_grad()
 
+        oom_count = 0  # Track OOM occurrences
         for batch_idx, batch in enumerate(self.train_loader):
-            # Move batch to device
-            images = batch["images"].to(self.device)
-            input_ids = batch["input_ids"].to(self.device)
-            attention_mask = batch["attention_mask"].to(self.device)
-            labels = batch["labels"].to(self.device)
+            try:
+                # Move batch to device
+                images = batch["images"].to(self.device)
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                labels = batch["labels"].to(self.device)
 
-            # Forward pass with mixed precision
-            with autocast(enabled=self.use_amp):
-                # For BART: shift labels to create decoder_input_ids
-                # decoder_input_ids should be labels shifted right with decoder_start_token_id
-                decoder_start_token_id = self.model.decoder.model.config.decoder_start_token_id
-                if decoder_start_token_id is None:
-                    decoder_start_token_id = self.model.decoder.bos_token_id
-                
-                # Create shifted decoder input ids
-                shifted_input_ids = labels.new_zeros(labels.shape)
-                shifted_input_ids[:, 1:] = labels[:, :-1].clone()
-                shifted_input_ids[:, 0] = decoder_start_token_id
-                
-                # Replace -100 (ignore index) with pad_token_id in decoder_input_ids
-                shifted_input_ids = shifted_input_ids.masked_fill(
-                    shifted_input_ids == -100, 
-                    self.model.decoder.pad_token_id
-                )
-                
-                outputs = self.model(
-                    images=images,
-                    decoder_input_ids=shifted_input_ids,
-                    decoder_attention_mask=attention_mask,
-                    labels=labels,
-                )
-                
-                # Main loss (with label smoothing applied in model)
-                loss = outputs["loss"]
-                
-                # Add region regularization loss for balanced anatomical attention
-                if self.use_anatomical_attention and outputs.get("region_weights") is not None:
-                    reg_loss = self._compute_region_regularization_loss(outputs["region_weights"])
-                    loss = loss + reg_loss
-                
-                # NOVEL: Add combined novel losses
-                if self.use_novel_losses:
-                    novel_losses = self.novel_loss(
-                        outputs=outputs,
-                        labels=labels,
-                        pad_token_id=self.model.decoder.pad_token_id,
+                # Forward pass with mixed precision (Fix: use device_type for PyTorch 2.4+)
+                with autocast('cuda', enabled=self.use_amp):
+                    # For BART: shift labels to create decoder_input_ids
+                    # decoder_input_ids should be labels shifted right with decoder_start_token_id
+                    decoder_start_token_id = self.model.decoder.model.config.decoder_start_token_id
+                    if decoder_start_token_id is None:
+                        decoder_start_token_id = self.model.decoder.bos_token_id
+
+                    # Create shifted decoder input ids
+                    shifted_input_ids = labels.new_zeros(labels.shape)
+                    shifted_input_ids[:, 1:] = labels[:, :-1].clone()
+                    shifted_input_ids[:, 0] = decoder_start_token_id
+
+                    # Replace IGNORE_INDEX with pad_token_id in decoder_input_ids
+                    shifted_input_ids = shifted_input_ids.masked_fill(
+                        shifted_input_ids == IGNORE_INDEX,
+                        self.model.decoder.pad_token_id
                     )
-                    total_novel_loss = novel_losses.get("total_novel", torch.tensor(0.0, device=self.device))
-                    loss = loss + total_novel_loss
-                
-                loss = loss / self.gradient_accumulation_steps
 
-            # Backward pass
-            if self.use_amp:
-                self.scaler.scale(loss).backward()
-            else:
-                loss.backward()
+                    outputs = self.model(
+                        images=images,
+                        decoder_input_ids=shifted_input_ids,
+                        decoder_attention_mask=attention_mask,
+                        labels=labels,
+                    )
 
-            total_loss += loss.item() * self.gradient_accumulation_steps
+                    # Main loss (with label smoothing applied in model)
+                    loss = outputs["loss"]
 
-            # Track HAQT-ARR region weights (periodically)
-            if self.use_anatomical_attention and batch_idx % 50 == 0:
-                if outputs.get("region_weights") is not None:
-                    region_weights = outputs["region_weights"].mean(dim=0).detach().cpu().numpy()
-                    self.region_weight_history.append(region_weights)
+                    # Add region regularization loss for balanced anatomical attention
+                    if self.use_anatomical_attention and outputs.get("region_weights") is not None:
+                        reg_loss = self._compute_region_regularization_loss(outputs["region_weights"])
+                        loss = loss + reg_loss
+
+                    # NOVEL: Add combined novel losses
+                    if self.use_novel_losses:
+                        novel_losses = self.novel_loss(
+                            outputs=outputs,
+                            labels=labels,
+                            pad_token_id=self.model.decoder.pad_token_id,
+                        )
+                        total_novel_loss = novel_losses.get("total_novel", torch.tensor(0.0, device=self.device))
+                        loss = loss + total_novel_loss
+
+                    loss = loss / self.gradient_accumulation_steps
+
+                # Backward pass
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+                total_loss += loss.item() * self.gradient_accumulation_steps
+
+                # Track HAQT-ARR region weights (periodically)
+                if self.use_anatomical_attention and batch_idx % 50 == 0:
+                    if outputs.get("region_weights") is not None:
+                        region_weights = outputs["region_weights"].mean(dim=0).detach().cpu().numpy()
+                        self.region_weight_history.append(region_weights)
+
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() and self.oom_recovery_enabled:
+                    # OOM Recovery: Clear cache and skip batch
+                    oom_count += 1
+                    logger.warning(f"OOM at batch {batch_idx}, clearing cache and skipping (OOM count: {oom_count})")
+
+                    # Clear all GPU memory
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+
+                    # Zero gradients to prevent corrupt state
+                    self.optimizer.zero_grad()
+
+                    # Skip this batch
+                    continue
+                else:
+                    raise e
 
             # Optimizer step with gradient accumulation
             if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
@@ -511,8 +545,8 @@ class XR2TextTrainer:
             labels = batch["labels"].to(self.device)
             raw_texts = batch["raw_texts"]
 
-            # Forward pass
-            with autocast(enabled=self.use_amp):
+            # Forward pass (Fix: use device_type for PyTorch 2.4+)
+            with autocast('cuda', enabled=self.use_amp):
                 # Create shifted decoder input ids (same as in training)
                 decoder_start_token_id = self.model.decoder.model.config.decoder_start_token_id
                 if decoder_start_token_id is None:

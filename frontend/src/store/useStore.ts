@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { ReportHistoryItem, GenerationSettings, ModelStatus } from '../types'
+import type { ReportHistoryItem, GenerationSettings, ModelStatus, GeneratedReport } from '../types'
 
 interface AppState {
   // Model Status
@@ -29,13 +29,6 @@ interface AppState {
   setIsGenerating: (value: boolean) => void
   sidebarOpen: boolean
   setSidebarOpen: (value: boolean) => void
-}
-
-interface GeneratedReport {
-  report: string
-  findings: string | null
-  impression: string | null
-  generation_time_ms: number
 }
 
 const useStore = create<AppState>()(

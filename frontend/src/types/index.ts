@@ -93,6 +93,8 @@ export interface ReportHistoryItem {
   generatedAt: Date
   edited: boolean
   editedReport?: string
+  // FIX: Add generation time for accurate stats
+  generationTimeMs?: number
   // HAQT-ARR attention data (optional)
   attentionData?: AttentionVisualization
 }

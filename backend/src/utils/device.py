@@ -206,31 +206,43 @@ class GPUMemoryMonitor:
 def get_gpu_temperature(device_id: int = 0) -> Optional[int]:
     """
     Get GPU temperature in Celsius.
-    
+
     Args:
         device_id: GPU device ID
-        
+
     Returns:
         Temperature in Celsius, or None if unavailable
     """
     if not torch.cuda.is_available():
         return None
-    
+
+    # Method 1: Try pynvml (most reliable for NVIDIA GPUs)
     try:
-        # Use PyTorch's built-in temperature function
-        temp = torch.cuda.temperature(device_id)
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+        temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
         return temp
-    except (AttributeError, RuntimeError, ModuleNotFoundError):
-        # Fallback: try using pynvml if available
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+    except Exception:
+        pass
+
+    # Method 2: Try nvidia-smi command (fallback)
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=temperature.gpu', '--format=csv,noheader,nounits', f'--id={device_id}'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            temp = int(result.stdout.strip())
             return temp
-        except (ImportError, ModuleNotFoundError, RuntimeError, Exception):
-            # Temperature monitoring not available - this is fine, training will continue
-            return None
+    except Exception:
+        pass
+
+    # Temperature monitoring not available - this is fine, training will continue
+    return None
 
 
 # Default temperature thresholds (can be overridden via config)

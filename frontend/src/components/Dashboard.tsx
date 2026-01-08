@@ -67,9 +67,13 @@ export default function Dashboard() {
     {
       icon: Clock,
       label: 'Avg. Generation Time',
-      value: history.length > 0
-        ? `${Math.round(history.slice(0, 10).reduce((acc, item) => acc + 250, 0) / Math.min(history.length, 10))}ms`
-        : 'N/A',
+      // FIX: Use actual generation times instead of hardcoded 250ms
+      value: (() => {
+        const recentWithTime = history.slice(0, 10).filter(item => item.generationTimeMs)
+        if (recentWithTime.length === 0) return history.length > 0 ? '~250ms' : 'N/A'
+        const avgTime = recentWithTime.reduce((acc, item) => acc + (item.generationTimeMs || 0), 0) / recentWithTime.length
+        return `${Math.round(avgTime)}ms`
+      })(),
       color: 'from-green-500 to-green-600',
     },
     {

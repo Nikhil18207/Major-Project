@@ -40,37 +40,62 @@ export default function ReportGenerator() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [report, setReport] = useState<GeneratedReport | null>(null)
   const [isEditing, setIsEditing] = useState(false)
-  const [editedReport, setEditedReport] = useState('')
   const [copied, setCopied] = useState(false)
+
+  // Separate edited state for each section (FIX: was sharing state between sections)
+  const [editedFindings, setEditedFindings] = useState('')
+  const [editedImpression, setEditedImpression] = useState('')
+  const [editedFullReport, setEditedFullReport] = useState('')
 
   // HAQT-ARR State
   const [attentionData, setAttentionData] = useState<AttentionVisualization | null>(null)
   const [isLoadingAttention, setIsLoadingAttention] = useState(false)
+  const [attentionError, setAttentionError] = useState<string | null>(null) // FIX: Add error state
   const [showAttention, setShowAttention] = useState(false)
   const [haqtEnabled, setHaqtEnabled] = useState(false)
 
   // Check if HAQT-ARR is enabled on mount
   useEffect(() => {
-    isHAQTARREnabled().then(setHaqtEnabled)
+    isHAQTARREnabled().then(setHaqtEnabled).catch(() => setHaqtEnabled(false))
   }, [])
+
+  // Cleanup preview URL on unmount to prevent memory leak
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl)
+      }
+    }
+  }, [previewUrl])
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0]
     if (file) {
+      // Revoke previous URL to prevent memory leak
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl)
+      }
       setSelectedFile(file)
       setPreviewUrl(URL.createObjectURL(file))
       setReport(null)
-      setEditedReport('')
+      // Reset all edited states
+      setEditedFindings('')
+      setEditedImpression('')
+      setEditedFullReport('')
       setIsEditing(false)
+      setCopied(false) // FIX: Reset copy state on new file
       setAttentionData(null)
+      setAttentionError(null)
       setShowAttention(false)
     }
-  }, [])
+  }, [previewUrl])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.dicom', '.dcm'],
+      'image/png': ['.png'],
+      'image/jpeg': ['.jpg', '.jpeg'],
+      'image/webp': ['.webp'],
     },
     maxFiles: 1,
     maxSize: 50 * 1024 * 1024, // 50MB
@@ -80,17 +105,27 @@ export default function ReportGenerator() {
     if (!selectedFile) return
 
     setIsGenerating(true)
+    setCopied(false) // FIX: Reset copy state on new generation
+    setAttentionError(null) // Reset attention error
+
+    // Capture current haqtEnabled value to avoid race condition
+    const shouldFetchAttention = haqtEnabled
+
     try {
       const result = await generateReport(selectedFile)
       setReport(result)
-      setEditedReport(result.report)
 
-      // Fetch HAQT-ARR attention data if enabled
-      if (haqtEnabled) {
+      // Initialize separate edited states for each section
+      setEditedFindings(result.findings || '')
+      setEditedImpression(result.impression || '')
+      setEditedFullReport(result.report)
+
+      // Fetch HAQT-ARR attention data if enabled (using captured value)
+      if (shouldFetchAttention) {
         fetchAttentionData()
       }
 
-      // Add to history
+      // Add to history with generation time
       addToHistory({
         id: crypto.randomUUID(),
         imageUrl: previewUrl!,
@@ -99,6 +134,7 @@ export default function ReportGenerator() {
         impression: result.impression,
         generatedAt: new Date(),
         edited: false,
+        generationTimeMs: result.generation_time_ms, // FIX: Store generation time
       })
 
       toast.success(`Report generated in ${result.generation_time_ms.toFixed(0)}ms`)
@@ -113,27 +149,65 @@ export default function ReportGenerator() {
     if (!selectedFile) return
 
     setIsLoadingAttention(true)
+    setAttentionError(null)
     try {
       const data = await getAttentionVisualization(selectedFile)
       setAttentionData(data)
     } catch (error) {
       console.error('Failed to fetch attention data:', error)
-      // Don't show error toast - attention is optional
+      // FIX: Set error state so user knows visualization failed
+      const errorMessage = error instanceof Error ? error.message : 'Failed to load attention data'
+      setAttentionError(errorMessage)
     } finally {
       setIsLoadingAttention(false)
     }
   }
 
+  // Combine edited sections into a full report
+  const getEditedFullReport = (): string => {
+    if (!report) return ''
+
+    // If no sections, return the edited full report
+    if (!report.findings && !report.impression) {
+      return editedFullReport
+    }
+
+    // Combine sections
+    const parts: string[] = []
+    if (editedFindings) {
+      parts.push(`FINDINGS:\n${editedFindings}`)
+    }
+    if (editedImpression) {
+      parts.push(`IMPRESSION:\n${editedImpression}`)
+    }
+    return parts.join('\n\n')
+  }
+
+  // Check if any section has been edited
+  const hasEdits = (): boolean => {
+    if (!report) return false
+
+    if (!report.findings && !report.impression) {
+      return editedFullReport !== report.report
+    }
+
+    return (
+      editedFindings !== (report.findings || '') ||
+      editedImpression !== (report.impression || '')
+    )
+  }
+
   const handleSaveEdit = async () => {
-    if (!report || editedReport === report.report) {
+    if (!report || !hasEdits()) {
       setIsEditing(false)
       return
     }
 
     try {
+      const correctedReport = getEditedFullReport()
       await submitFeedback({
         original_report: report.report,
-        corrected_report: editedReport,
+        corrected_report: correctedReport,
         feedback_notes: 'Radiologist correction',
       })
 
@@ -145,7 +219,8 @@ export default function ReportGenerator() {
   }
 
   const handleCopy = () => {
-    const textToCopy = isEditing ? editedReport : report?.report
+    // Copy the appropriate content based on editing state
+    const textToCopy = isEditing ? getEditedFullReport() : report?.report
     if (textToCopy) {
       navigator.clipboard.writeText(textToCopy)
       setCopied(true)
@@ -155,12 +230,21 @@ export default function ReportGenerator() {
   }
 
   const handleClear = () => {
+    // Revoke URL to prevent memory leak
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl)
+    }
     setSelectedFile(null)
     setPreviewUrl(null)
     setReport(null)
-    setEditedReport('')
+    // Reset all edited states
+    setEditedFindings('')
+    setEditedImpression('')
+    setEditedFullReport('')
     setIsEditing(false)
+    setCopied(false)
     setAttentionData(null)
+    setAttentionError(null)
     setShowAttention(false)
   }
 
@@ -208,7 +292,7 @@ export default function ReportGenerator() {
                   {isDragActive ? 'Drop the image here' : 'Drag & drop an X-ray image'}
                 </p>
                 <p className="text-sm text-gray-400 mt-2">
-                  or click to browse (PNG, JPG, DICOM)
+                  or click to browse (PNG, JPG, WebP)
                 </p>
               </div>
             ) : (
@@ -300,7 +384,15 @@ export default function ReportGenerator() {
                     ) : (
                       <div className="text-center py-8 text-gray-400">
                         <Brain size={32} className="mx-auto mb-2 opacity-50" />
-                        <p>Attention data not available</p>
+                        {/* FIX: Show error message if attention fetch failed */}
+                        {attentionError ? (
+                          <>
+                            <p className="text-red-500 mb-1">Failed to load attention data</p>
+                            <p className="text-xs text-gray-400 mb-2">{attentionError}</p>
+                          </>
+                        ) : (
+                          <p>Attention data not available</p>
+                        )}
                         <button
                           onClick={fetchAttentionData}
                           className="mt-2 text-purple-600 hover:text-purple-700 text-sm"
@@ -390,36 +482,36 @@ export default function ReportGenerator() {
                 exit={{ opacity: 0, y: -20 }}
                 className="space-y-4"
               >
-                {/* Findings Section */}
+                {/* Findings Section - FIX: Use separate editedFindings state */}
                 {(report.findings || isEditing) && (
                   <ReportSection
                     title="FINDINGS"
                     content={report.findings || ''}
                     isEditing={isEditing}
-                    editedContent={editedReport}
-                    onEditChange={setEditedReport}
+                    editedContent={editedFindings}
+                    onEditChange={setEditedFindings}
                   />
                 )}
 
-                {/* Impression Section */}
+                {/* Impression Section - FIX: Use separate editedImpression state */}
                 {(report.impression || isEditing) && (
                   <ReportSection
                     title="IMPRESSION"
                     content={report.impression || ''}
                     isEditing={isEditing}
-                    editedContent={editedReport}
-                    onEditChange={setEditedReport}
+                    editedContent={editedImpression}
+                    onEditChange={setEditedImpression}
                   />
                 )}
 
-                {/* Full Report (if no sections) */}
+                {/* Full Report (if no sections) - FIX: Use editedFullReport state */}
                 {!report.findings && !report.impression && (
                   <ReportSection
                     title="REPORT"
                     content={report.report}
                     isEditing={isEditing}
-                    editedContent={editedReport}
-                    onEditChange={setEditedReport}
+                    editedContent={editedFullReport}
+                    onEditChange={setEditedFullReport}
                   />
                 )}
 

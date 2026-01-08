@@ -53,7 +53,7 @@ This project introduces several novel research contributions:
 ## Architecture Overview
 
 ```
-Input Chest X-Ray (512×512)
+Input Chest X-Ray (384×384)
          ↓
 ┌─────────────────────────────────┐
 │  Swin Transformer Encoder       │
@@ -62,7 +62,7 @@ Input Chest X-Ray (512×512)
 │  - Pre-trained on ImageNet      │
 └─────────────────────────────────┘
          ↓
-Visual Features (B, 1024, 16×16)
+Visual Features (B, 1024, 12×12)
          ↓
 ┌─────────────────────────────────┐
 │  HAQT-ARR Module (NOVEL)        │
