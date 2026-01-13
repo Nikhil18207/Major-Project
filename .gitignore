@@ -102,3 +102,4 @@ temp_cells.txt
 # Windows null device files (created accidentally)
 **/nul
 nul
+tmpclaude-*-cwd
