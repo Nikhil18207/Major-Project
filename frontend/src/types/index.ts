@@ -19,6 +19,22 @@ export type AnatomicalRegion =
   | 'diaphragm'
   | 'costophrenic_angles'
 
+// Valid anatomical region values for runtime type checking
+const VALID_ANATOMICAL_REGIONS: readonly AnatomicalRegion[] = [
+  'right_lung',
+  'left_lung',
+  'heart',
+  'mediastinum',
+  'spine',
+  'diaphragm',
+  'costophrenic_angles',
+] as const
+
+// Type guard to safely validate if a string is a valid AnatomicalRegion
+export function isAnatomicalRegion(value: string): value is AnatomicalRegion {
+  return VALID_ANATOMICAL_REGIONS.includes(value as AnatomicalRegion)
+}
+
 // HAQT-ARR Attention Visualization Response (Novel)
 export interface AttentionVisualization {
   anatomical_regions: AnatomicalRegion[]

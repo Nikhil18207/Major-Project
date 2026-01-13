@@ -1,16 +1,33 @@
-# XR2Text Default Configuration with HAQT-ARR (Novel)
+# XR2Text IMPROVED Configuration with HAQT-ARR (Novel)
 # =====================================================
+# OPTIMIZED FOR RTX 4060 8GB VRAM
 # Authors: S. Nikhil, Dadhania Omkumar
 # Supervisor: Dr. Damodar Panigrahy
+#
+# IMPROVEMENTS MADE:
+# 1. BioBART-Large decoder for better generation
+# 2. Optimized learning rate and schedule
+# 3. R-Drop regularization enabled
+# 4. Cross-modal loss enabled
+# 5. Better generation parameters
+# 6. Gradient checkpointing for memory efficiency
+# 7. Extended curriculum learning stages
 
 # Model Configuration
 model:
-  image_size: 384
+  image_size: 384  # Keep 384 for RTX 4060 memory (512 would OOM)
   freeze_encoder: false
   use_anatomical_attention: true  # Enable HAQT-ARR (Novel)
+  gradient_checkpointing: true    # IMPROVED: Enable for memory efficiency
+
+  # NOVEL: Enhancement Modules (10/10 Novelty)
+  use_uncertainty: true          # Uncertainty quantification
+  use_grounding: true            # Factual grounding & hallucination detection
+  use_explainability: true       # Explainability & evidence regions
+  use_multitask: true            # Multi-task learning heads
 
   encoder:
-    model_name: "base"  # tiny, small, base, large
+    model_name: "base"  # Swin-Base (keep for RTX 4060 memory)
     pretrained: true
     freeze_layers: 0
     output_dim: 1024
@@ -19,8 +36,7 @@ model:
 
   # HAQT-ARR Projection Layer (Novel Contribution)
   projection:
-    language_dim: 768
-    # HAQT-ARR specific parameters
+    language_dim: 1024                # FIXED: Must match BioBART-Large hidden dim
     num_regions: 7              # 7 anatomical regions
     num_global_queries: 8       # Global context queries
     num_region_queries: 4       # Queries per anatomical region (total: 8 + 7*4 = 36)
@@ -32,74 +48,134 @@ model:
     use_spatial_priors: true    # Learnable 2D Gaussian priors
     use_adaptive_routing: true  # Dynamic region importance
     use_cross_region: true      # Cross-region interaction
-    # Standard projection parameters (used if use_anatomical_attention: false)
+    # Standard projection parameters (fallback)
     num_projection_layers: 2
     num_queries: 32
     use_cross_attention: true
     use_residual: true
 
   decoder:
-    model_name: "biobart"  # biobart, distilgpt2, gpt2
+    # IMPROVED: Use BioBART-Large for better generation quality
+    model_name: "biobart-large"  # Changed from "biobart" (base)
     max_length: 512
     freeze_embeddings: false
     freeze_layers: 0
     use_cache: true
     dropout: 0.1
 
-# Training Configuration
+# Training Configuration - OPTIMIZED FOR RTX 4060 8GB
 training:
-  epochs: 50
-  batch_size: 4  # Reduced for RTX 4060 (8GB) with HAQT-ARR
-  learning_rate: 5.0e-5
-  weight_decay: 0.01
-  warmup_steps: 500
-  gradient_accumulation_steps: 8  # Effective batch size = 4 * 8 = 32
+  epochs: 100                             # IMPROVED: Full training with finetune stage
+  batch_size: 1                           # IMPROVED: Reduced for RTX 4060 with larger model
+  learning_rate: 1.0e-4                   # IMPROVED: Higher LR for faster convergence
+  weight_decay: 0.05                      # IMPROVED: More regularization
+  warmup_steps: 1000                      # IMPROVED: Longer warmup
+  gradient_accumulation_steps: 32         # IMPROVED: Effective batch = 32
   max_grad_norm: 1.0
-  use_amp: true  # Mixed precision for RTX 4060
+  use_amp: true                           # Essential for RTX 4060
 
   # Scheduler
-  scheduler: "cosine"  # linear, cosine, cosine_restarts, polynomial
+  scheduler: "cosine_with_restarts"       # IMPROVED: Restarts help escape local minima
+  num_cycles: 3                           # Number of cosine cycles
 
-  # Early stopping (increased patience for better convergence)
-  patience: 15  # Increased from 5 for more training iterations
+  # Early stopping
+  patience: 20                            # IMPROVED: More patience
 
-  # Label smoothing for regularization (Novel improvement)
-  label_smoothing: 0.1  # Reduces overconfident predictions
-  
-  # Scheduled sampling for improved generation (Novel improvement)
+  # Validation
+  val_fraction: 0.15
+  validate_every: 2                       # Validate every 2 epochs
+
+  # IMPROVED: Reduced label smoothing
+  label_smoothing: 0.05                   # Reduced from 0.1
+
+  # Scheduled sampling for improved generation
   use_scheduled_sampling: true
-  scheduled_sampling_start: 1.0   # Start with 100% teacher forcing
-  scheduled_sampling_end: 0.5     # End with 50% teacher forcing
-  scheduled_sampling_warmup: 5    # Warmup epochs before decay
-  
-  # Region weight regularization for balanced anatomical attention
+  scheduled_sampling_start: 1.0
+  scheduled_sampling_end: 0.4             # IMPROVED: Lower end ratio
+  scheduled_sampling_warmup: 10           # IMPROVED: Longer warmup
+
+  # IMPROVED: R-Drop regularization (NEW)
+  use_rdrop: true
+  rdrop_alpha: 0.7                        # R-Drop loss weight
+
+  # Region weight regularization
   use_region_regularization: true
-  region_regularization_weight: 0.01  # Entropy-based regularization
-  
+  region_regularization_weight: 0.01
+
   # NOVEL: Novel loss functions
   use_novel_losses: true
   use_anatomical_consistency_loss: true
   use_clinical_entity_loss: true
   use_region_focal_loss: true
-  use_cross_modal_loss: false  # Requires decoder hidden states
+  use_cross_modal_loss: true              # IMPROVED: Now enabled
   anatomical_loss_weight: 0.1
   clinical_loss_weight: 0.2
   focal_loss_weight: 0.15
   alignment_loss_weight: 0.1
-  
-  # NOVEL: Curriculum learning
+
+  # NOVEL: Curriculum learning with IMPROVED stages
   use_curriculum_learning: true
-  
+  curriculum_stages:
+    - name: "warmup"
+      epoch_start: 0
+      epoch_end: 10
+      criteria: {max_findings: 1, severity: "normal"}
+    - name: "easy"
+      epoch_start: 10
+      epoch_end: 25
+      criteria: {max_findings: 2, max_regions: 2}
+    - name: "medium"
+      epoch_start: 25
+      epoch_end: 50
+      criteria: {max_findings: 4, max_regions: 4}
+    - name: "hard"
+      epoch_start: 50
+      epoch_end: 80
+      criteria: {}  # All samples
+    - name: "finetune"
+      epoch_start: 80
+      epoch_end: 100
+      criteria: {}  # Full dataset fine-tuning with lower LR
+
   # NOVEL: Clinical validation
   use_clinical_validation: true
 
-  # GPU Temperature Monitoring (for RTX 4060 safety)
-  enable_temp_monitoring: true
-  max_gpu_temp: 83        # RTX 4060 throttle temperature
-  warning_gpu_temp: 75    # Warning threshold
-  pause_gpu_temp: 80     # Pause training threshold
-  temp_check_interval: 10 # Check every 10 batches
-  gpu_cooldown_time: 30   # Wait 30 seconds when paused
+  # NOVEL: Uncertainty Quantification
+  use_uncertainty_training: true
+  uncertainty_dropout: 0.1
+  mc_samples: 5                           # Reduced for memory
+  use_calibration: true
+
+  # NOVEL: Multi-Task Learning
+  use_multi_task_learning: true
+  auxiliary_task_weights:
+    region_classification: 0.1
+    severity_prediction: 0.1
+    finding_detection: 0.15
+    length_prediction: 0.05
+
+  # NOVEL: Factual Grounding
+  use_factual_grounding: true
+  grounding_loss_weight: 0.1
+  grounding_threshold: 0.15
+
+  # NOVEL: Self-Supervised Pre-training (optional)
+  use_pretraining: false
+  pretrain_epochs: 10
+  contrastive_temperature: 0.07
+  mask_ratio: 0.15
+
+  # NOVEL: OOD Detection
+  use_ood_detection: true
+  ood_threshold: 0.5
+
+  # GPU Temperature Monitoring (RTX 4060)
+  enable_temp_monitoring: true            # IMPROVED: Enable monitoring
+  max_gpu_temp: 95                        # Stop training at 95C
+  warning_gpu_temp: 85                    # Warn at 85C
+  pause_gpu_temp: 91                      # Pause at 91C
+  temp_check_interval: 50                 # Check every 50 batches
+  gpu_cooldown_time: 30                   # 30 second cooldown
 
   # Checkpointing
   checkpoint_dir: "checkpoints"
@@ -107,7 +183,7 @@ training:
 
   # Logging
   log_every: 100
-  experiment_name: "xr2text_haqt_arr"
+  experiment_name: "xr2text_haqt_arr_improved"
 
 # Data Configuration
 data:
@@ -115,23 +191,27 @@ data:
   image_size: 384
   max_length: 256
   target_type: "both"  # findings, impression, both
-  num_workers: 2  # Reduced for stability
+  num_workers: 2
   pin_memory: true
   prefetch_factor: 2
 
-# Generation Configuration
+# Generation Configuration - IMPROVED
 generation:
   max_length: 256
-  min_length: 20
-  num_beams: 4
+  min_length: 30                          # IMPROVED: Longer min
+  num_beams: 6                            # IMPROVED: More beams
   temperature: 1.0
   top_k: 50
-  top_p: 0.95
-  repetition_penalty: 1.2
-  length_penalty: 1.0
-  no_repeat_ngram_size: 3
+  top_p: 0.92                             # IMPROVED: Slightly lower
+  repetition_penalty: 1.5                 # IMPROVED: Higher penalty
+  length_penalty: 1.2                     # IMPROVED: Encourage longer
+  no_repeat_ngram_size: 4                 # IMPROVED: Larger n-gram
   early_stopping: true
   do_sample: false
+
+  # IMPROVED: Diverse beam search
+  num_beam_groups: 2
+  diversity_penalty: 0.5
 
 # API Configuration
 api:
@@ -146,6 +226,23 @@ logging:
   log_dir: "logs"
   log_to_file: true
   log_to_console: true
+
+# Evaluation Configuration - NEW
+evaluation:
+  # Standard NLG metrics
+  use_bleu: true
+  use_rouge: true
+  use_meteor: true
+  use_cider: true
+
+  # IMPROVED: Clinical metrics
+  use_clinical_f1: true                   # NEW: Clinical entity F1
+  use_radgraph: true                      # NEW: RadGraph score
+  use_chexbert: true                      # NEW: CheXbert labeler
+
+  # Uncertainty metrics
+  use_calibration_metrics: true
+  use_ece: true                           # Expected Calibration Error
 
 # Anatomical Regions (for reference)
 # - right_lung: Right lung field (upper, middle, lower lobes)

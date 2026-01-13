@@ -21,6 +21,10 @@ from typing import Optional, Dict, List
 import re
 from loguru import logger
 
+# Standard PyTorch ignore index for CrossEntropyLoss
+# Must match the value used in dataset.py MIMICCXRCollator
+IGNORE_INDEX = -100
+
 
 class AnatomicalConsistencyLoss(nn.Module):
     """
@@ -245,7 +249,7 @@ class ClinicalEntityLoss(nn.Module):
             Entity loss scalar
         """
         if len(generated_texts) == 0:
-            return torch.tensor(0.0)
+            return torch.tensor(0.0, requires_grad=False)
 
         total_loss = 0.0
         num_samples = 0
@@ -306,10 +310,10 @@ class ClinicalEntityLoss(nn.Module):
             num_samples += 1
 
         if num_samples == 0:
-            return torch.tensor(0.0)
+            return torch.tensor(0.0, requires_grad=False)
 
         avg_loss = total_loss / num_samples
-        return torch.tensor(self.weight * avg_loss)
+        return torch.tensor(self.weight * avg_loss, requires_grad=False)
 
 
 class RegionAwareFocalLoss(nn.Module):
@@ -353,27 +357,29 @@ class RegionAwareFocalLoss(nn.Module):
         try:
             # Get vocab size for label validation
             vocab_size = logits.size(-1)
-            
+
             # CRITICAL: Validate and clamp labels to prevent CUDA index errors
-            # Labels must be in range [0, vocab_size-1] or equal to pad_token_id (ignore_index)
+            # Labels must be in range [0, vocab_size-1] or equal to IGNORE_INDEX (-100)
+            # Note: The collator sets padding positions to IGNORE_INDEX (-100), not pad_token_id
             labels_flat = labels.view(-1).clone()
-            
-            # Create mask for valid positions (non-padding)
-            valid_mask = labels_flat != pad_token_id
-            
+
+            # Create mask for valid positions (non-ignored, using IGNORE_INDEX not pad_token_id)
+            valid_mask = labels_flat != IGNORE_INDEX
+
             # Clamp labels to valid vocab range to prevent CUDA index out of bounds
-            # Only clamp non-padding positions
+            # Only clamp non-ignored positions
             labels_flat = torch.where(
                 valid_mask,
                 torch.clamp(labels_flat, min=0, max=vocab_size - 1),
-                labels_flat  # Keep padding as-is
+                labels_flat  # Keep IGNORE_INDEX as-is
             )
-            
+
             # Standard cross-entropy with validated labels
+            # Use IGNORE_INDEX (-100) as ignore_index to match collator behavior
             ce_loss = F.cross_entropy(
                 logits.view(-1, vocab_size),
                 labels_flat,
-                ignore_index=pad_token_id,
+                ignore_index=IGNORE_INDEX,
                 reduction='none'
             )
             
@@ -592,6 +598,15 @@ class CombinedNovelLoss(nn.Module):
                         losses['cross_modal'] = align_loss
                         if align_loss.requires_grad:
                             loss_components.append(align_loss)
+                elif decoder_hidden is None:
+                    # Log warning once per session about missing decoder hidden states
+                    if not hasattr(self, '_cross_modal_warned'):
+                        logger.warning(
+                            "Cross-modal loss is enabled but decoder_hidden_states is not available. "
+                            "To use this loss, modify biobart_decoder.py to expose hidden states. "
+                            "Set use_cross_modal_loss: false in config to disable this warning."
+                        )
+                        self._cross_modal_warned = True
             except Exception as e:
                 logger.debug(f"Cross-modal alignment loss error: {e}")
 

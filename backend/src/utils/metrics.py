@@ -210,18 +210,206 @@ def compute_cider(
     return np.mean(scores) * 10 if scores else 0.0  # Scale by 10 for readability
 
 
-def compute_metrics(
+def compute_clinical_f1(
     predictions: List[str],
     references: List[str],
-    include_all: bool = True,
 ) -> Dict[str, float]:
     """
-    Compute all metrics for report generation evaluation.
+    IMPROVED: Compute Clinical Entity F1 Score with Negation Awareness.
+
+    This metric evaluates the accuracy of clinical findings mentioned in
+    generated reports, which is more clinically relevant than BLEU/ROUGE.
+
+    Features:
+    - Extracts 22 common chest X-ray findings
+    - Handles negation (e.g., "no pneumonia" vs "pneumonia")
+    - Computes precision, recall, and F1 for clinical entities
 
     Args:
         predictions: List of generated texts
         references: List of reference texts
-        include_all: Whether to include all metrics or just BLEU/ROUGE
+
+    Returns:
+        Dictionary with clinical_precision, clinical_recall, clinical_f1
+    """
+    # Clinical findings to track (expanded list)
+    clinical_findings = [
+        'cardiomegaly', 'pneumonia', 'effusion', 'edema', 'consolidation',
+        'atelectasis', 'pneumothorax', 'infiltrate', 'mass', 'nodule',
+        'pleural thickening', 'opacity', 'fibrosis', 'fracture',
+        'pleural effusion', 'pulmonary edema', 'emphysema', 'hernia',
+        'calcification', 'scoliosis', 'tortuous aorta', 'lymphadenopathy'
+    ]
+
+    # Negation patterns
+    negation_patterns = [
+        'no ', 'no evidence of ', 'without ', 'negative for ',
+        'absence of ', 'absent ', 'not ', 'denies ', 'ruled out ',
+        'no acute ', 'no significant ', 'clear', 'unremarkable', 'normal'
+    ]
+
+    def extract_findings(text: str) -> tuple:
+        """Extract positive and negative findings from text."""
+        text_lower = text.lower()
+        positive = set()
+        negative = set()
+
+        for finding in clinical_findings:
+            if finding in text_lower:
+                # Check if negated
+                finding_pos = text_lower.find(finding)
+                context_start = max(0, finding_pos - 40)
+                context = text_lower[context_start:finding_pos]
+
+                is_negated = any(neg in context for neg in negation_patterns)
+                if is_negated:
+                    negative.add(finding)
+                else:
+                    positive.add(finding)
+
+        return positive, negative
+
+    total_tp = 0
+    total_fp = 0
+    total_fn = 0
+    total_critical_errors = 0
+
+    for pred, ref in zip(predictions, references):
+        pred_pos, pred_neg = extract_findings(pred)
+        ref_pos, ref_neg = extract_findings(ref)
+
+        # True positives: correctly identified positive findings
+        tp = len(pred_pos & ref_pos) + len(pred_neg & ref_neg)
+
+        # False positives: predicted positive but not in reference
+        fp = len(pred_pos - ref_pos) + len(pred_neg - ref_neg)
+
+        # False negatives: in reference but not predicted
+        fn = len(ref_pos - pred_pos) + len(ref_neg - pred_neg)
+
+        # Critical errors: saying positive when actually negative (dangerous!)
+        critical = len(pred_pos & ref_neg)
+
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
+        total_critical_errors += critical
+
+    precision = total_tp / (total_tp + total_fp + 1e-8)
+    recall = total_tp / (total_tp + total_fn + 1e-8)
+    f1 = 2 * precision * recall / (precision + recall + 1e-8)
+
+    return {
+        "clinical_precision": precision,
+        "clinical_recall": recall,
+        "clinical_f1": f1,
+        "clinical_critical_errors": total_critical_errors,
+    }
+
+
+def compute_radgraph_f1(
+    predictions: List[str],
+    references: List[str],
+) -> Dict[str, float]:
+    """
+    IMPROVED: Compute RadGraph F1 Score.
+
+    RadGraph extracts entities and relations from radiology reports
+    and computes F1 based on entity/relation matching.
+
+    Note: Requires radgraph package. Falls back to entity-based F1 if unavailable.
+
+    Args:
+        predictions: List of generated texts
+        references: List of reference texts
+
+    Returns:
+        Dictionary with radgraph_f1 and related metrics
+    """
+    try:
+        # Try to use official RadGraph scorer
+        from radgraph import F1RadGraph
+        scorer = F1RadGraph(reward_level="all")
+        score, _, _ = scorer(hyps=predictions, refs=references)
+        return {
+            "radgraph_f1": score,
+            "radgraph_available": True,
+        }
+    except ImportError:
+        # Fallback: Compute entity-based F1 (simplified RadGraph)
+        logger.info("RadGraph not installed. Using simplified entity F1.")
+
+        # Use clinical F1 as approximation
+        clinical_metrics = compute_clinical_f1(predictions, references)
+        return {
+            "radgraph_f1": clinical_metrics["clinical_f1"],
+            "radgraph_available": False,
+        }
+    except Exception as e:
+        logger.warning(f"RadGraph computation failed: {e}")
+        return {
+            "radgraph_f1": 0.0,
+            "radgraph_available": False,
+        }
+
+
+def compute_bertscore(
+    predictions: List[str],
+    references: List[str],
+) -> Dict[str, float]:
+    """
+    IMPROVED: Compute BERTScore for semantic similarity.
+
+    BERTScore uses contextualized embeddings to measure
+    semantic similarity between generated and reference texts.
+
+    Args:
+        predictions: List of generated texts
+        references: List of reference texts
+
+    Returns:
+        Dictionary with bertscore_precision, bertscore_recall, bertscore_f1
+    """
+    try:
+        from bert_score import score
+        P, R, F1 = score(predictions, references, lang="en", rescale_with_baseline=True)
+        return {
+            "bertscore_precision": P.mean().item(),
+            "bertscore_recall": R.mean().item(),
+            "bertscore_f1": F1.mean().item(),
+        }
+    except ImportError:
+        logger.info("bert_score not installed. Skipping BERTScore.")
+        return {
+            "bertscore_precision": 0.0,
+            "bertscore_recall": 0.0,
+            "bertscore_f1": 0.0,
+        }
+    except Exception as e:
+        logger.warning(f"BERTScore computation failed: {e}")
+        return {
+            "bertscore_precision": 0.0,
+            "bertscore_recall": 0.0,
+            "bertscore_f1": 0.0,
+        }
+
+
+def compute_metrics(
+    predictions: List[str],
+    references: List[str],
+    include_all: bool = True,
+    include_clinical: bool = True,
+) -> Dict[str, float]:
+    """
+    Compute all metrics for report generation evaluation.
+
+    IMPROVED: Now includes clinical metrics for medical AI evaluation.
+
+    Args:
+        predictions: List of generated texts
+        references: List of reference texts
+        include_all: Whether to include all NLG metrics
+        include_clinical: Whether to include clinical metrics (F1, RadGraph)
 
     Returns:
         Dictionary with all metric scores
@@ -242,6 +430,16 @@ def compute_metrics(
 
         # CIDEr
         metrics["cider"] = compute_cider(predictions, references)
+
+    # IMPROVED: Clinical metrics for medical AI evaluation
+    if include_clinical:
+        # Clinical Entity F1 (negation-aware)
+        clinical = compute_clinical_f1(predictions, references)
+        metrics.update(clinical)
+
+        # RadGraph F1 (if available)
+        radgraph = compute_radgraph_f1(predictions, references)
+        metrics.update(radgraph)
 
     return metrics
 

@@ -22,6 +22,7 @@ import os
 import gc
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 # Fix: Use non-deprecated amp imports (PyTorch 2.4+)
 from torch.amp import GradScaler, autocast
@@ -99,6 +100,7 @@ class XR2TextTrainer:
         self.base_train_dataset = train_loader.dataset
         self.train_batch_size = train_loader.batch_size
         self.train_num_workers = train_loader.num_workers if hasattr(train_loader, 'num_workers') else 0
+        self.train_collate_fn = train_loader.collate_fn  # Store collate_fn for curriculum
 
         # Training settings
         self.epochs = config.get("epochs", 50)
@@ -155,8 +157,26 @@ class XR2TextTrainer:
             self.clinical_validator = ClinicalValidator()
             logger.info("Clinical validation enabled")
 
-        # GPU Temperature Monitoring - disabled for uninterrupted training
+        # IMPROVED: R-Drop regularization for better generation
+        self.use_rdrop = config.get("use_rdrop", True)
+        self.rdrop_alpha = config.get("rdrop_alpha", 0.7)
+        if self.use_rdrop:
+            logger.info(f"R-Drop regularization enabled with alpha={self.rdrop_alpha}")
+
+        # GPU Temperature Monitoring - controlled by config.enable_temp_monitoring
+        # When enabled, training will pause if GPU temperature exceeds thresholds
+        self.enable_temp_monitoring = config.get("enable_temp_monitoring", False)
         self.temp_monitor = None
+        if self.enable_temp_monitoring:
+            self.max_gpu_temp = config.get("max_gpu_temp", 83)
+            self.warning_gpu_temp = config.get("warning_gpu_temp", 75)
+            self.pause_gpu_temp = config.get("pause_gpu_temp", 80)
+            self.temp_check_interval = config.get("temp_check_interval", 10)
+            self.gpu_cooldown_time = config.get("gpu_cooldown_time", 30)
+            logger.info(
+                f"GPU temperature monitoring enabled: "
+                f"pause at {self.pause_gpu_temp}°C, max {self.max_gpu_temp}°C"
+            )
 
         # Checkpointing
         self.checkpoint_dir = Path(config.get("checkpoint_dir", "checkpoints"))
@@ -279,8 +299,64 @@ class XR2TextTrainer:
         # Regularization loss = negative entropy (we want to maximize entropy)
         # Normalize by max entropy so loss is in [0, 1] range
         reg_loss = (max_entropy - entropy) / max_entropy
-        
+
         return self.region_reg_weight * reg_loss
+
+    def _compute_rdrop_loss(
+        self,
+        logits1: torch.Tensor,
+        logits2: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        IMPROVED: R-Drop Regularization Loss (with proper error handling)
+
+        R-Drop (Regularized Dropout) performs two forward passes with dropout
+        and minimizes the bidirectional KL divergence between the two output
+        distributions. This regularization significantly improves NLG tasks.
+
+        Paper: "R-Drop: Regularized Dropout for Neural Networks" (NeurIPS 2021)
+
+        Args:
+            logits1: Logits from first forward pass (B, seq_len, vocab_size)
+            logits2: Logits from second forward pass (B, seq_len, vocab_size)
+            labels: Target labels for masking padding (B, seq_len)
+
+        Returns:
+            R-Drop KL divergence loss
+        """
+        try:
+            # Create mask for non-padding positions
+            mask = (labels != IGNORE_INDEX).float()
+
+            # Check if mask has any valid positions
+            mask_sum = mask.sum()
+            if mask_sum == 0:
+                return torch.tensor(0.0, device=logits1.device, requires_grad=True)
+
+            # Compute log probabilities with numerical stability
+            log_probs1 = F.log_softmax(logits1, dim=-1)
+            log_probs2 = F.log_softmax(logits2, dim=-1)
+            probs1 = F.softmax(logits1, dim=-1)
+            probs2 = F.softmax(logits2, dim=-1)
+
+            # Bidirectional KL divergence: KL(p1||p2) + KL(p2||p1)
+            # Use detach to prevent double backprop through probs
+            kl_loss1 = F.kl_div(log_probs1, probs2.detach(), reduction='none').sum(dim=-1)
+            kl_loss2 = F.kl_div(log_probs2, probs1.detach(), reduction='none').sum(dim=-1)
+
+            # Apply mask and average
+            kl_loss = (kl_loss1 + kl_loss2) * mask
+            kl_loss = kl_loss.sum() / (mask_sum + 1e-8)
+
+            # Clamp to prevent NaN/Inf
+            kl_loss = torch.clamp(kl_loss, min=0.0, max=100.0)
+
+            return self.rdrop_alpha * kl_loss
+
+        except Exception as e:
+            logger.warning(f"R-Drop loss computation failed: {e}, returning 0")
+            return torch.tensor(0.0, device=logits1.device, requires_grad=True)
 
     def train(self) -> Dict[str, float]:
         """
@@ -309,6 +385,7 @@ class XR2TextTrainer:
                     num_workers=self.train_num_workers,
                     pin_memory=True,
                     drop_last=True,
+                    collate_fn=self.train_collate_fn,  # Use original collate function
                 )
                 logger.info(f"Curriculum stage: {stage_name} ({len(curriculum_dataset)}/{len(self.base_train_dataset)} samples)")
 
@@ -422,6 +499,7 @@ class XR2TextTrainer:
                         self.model.decoder.pad_token_id
                     )
 
+                    # First forward pass
                     outputs = self.model(
                         images=images,
                         decoder_input_ids=shifted_input_ids,
@@ -431,6 +509,24 @@ class XR2TextTrainer:
 
                     # Main loss (with label smoothing applied in model)
                     loss = outputs["loss"]
+
+                    # IMPROVED: R-Drop regularization - second forward pass
+                    if self.use_rdrop and self.model.training:
+                        outputs2 = self.model(
+                            images=images,
+                            decoder_input_ids=shifted_input_ids,
+                            decoder_attention_mask=attention_mask,
+                            labels=labels,
+                        )
+                        # Average the two losses
+                        loss = (loss + outputs2["loss"]) / 2.0
+                        # Add R-Drop KL divergence loss
+                        rdrop_loss = self._compute_rdrop_loss(
+                            outputs["logits"],
+                            outputs2["logits"],
+                            labels,
+                        )
+                        loss = loss + rdrop_loss
 
                     # Add region regularization loss for balanced anatomical attention
                     if self.use_anatomical_attention and outputs.get("region_weights") is not None:
@@ -556,7 +652,7 @@ class XR2TextTrainer:
                 shifted_input_ids[:, 1:] = labels[:, :-1].clone()
                 shifted_input_ids[:, 0] = decoder_start_token_id
                 shifted_input_ids = shifted_input_ids.masked_fill(
-                    shifted_input_ids == -100, 
+                    shifted_input_ids == IGNORE_INDEX,
                     self.model.decoder.pad_token_id
                 )
                 

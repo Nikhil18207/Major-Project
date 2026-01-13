@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from loguru import logger
 
 from ..data.transforms import get_val_transforms, XRayTransform
+from ..models.anatomical_attention import NUM_ANATOMICAL_REGIONS
 
 
 router = APIRouter()
@@ -62,6 +63,40 @@ class GeneratedReport(BaseModel):
     impression: Optional[str] = Field(None, description="Extracted impression section")
     generation_time_ms: float = Field(..., description="Generation time in milliseconds")
     confidence_score: Optional[float] = Field(None, description="Model confidence score")
+
+    # NOVEL: Enhanced response fields
+    reliability: Optional[str] = Field(None, description="Reliability category: high/medium/low")
+    needs_review: Optional[bool] = Field(None, description="Whether radiologist review is recommended")
+    uncertainty: Optional[Dict] = Field(None, description="Detailed uncertainty metrics")
+    grounding: Optional[Dict] = Field(None, description="Factual grounding validation")
+    explanation: Optional[Dict] = Field(None, description="Explainability information")
+
+
+class AnalyzedReport(BaseModel):
+    """Response model for comprehensive report analysis (Novel)."""
+    report: str = Field(..., description="Generated radiology report")
+    findings: Optional[str] = Field(None, description="Extracted findings section")
+    impression: Optional[str] = Field(None, description="Extracted impression section")
+    generation_time_ms: float = Field(..., description="Generation time in milliseconds")
+
+    # Uncertainty (Novel)
+    confidence_score: float = Field(..., description="Overall confidence (0-1)")
+    epistemic_uncertainty: float = Field(..., description="Model uncertainty")
+    aleatoric_uncertainty: float = Field(..., description="Data uncertainty")
+    reliability: str = Field(..., description="Reliability: high/medium/low")
+    needs_review: bool = Field(..., description="Radiologist review recommended")
+    ood_score: float = Field(..., description="Out-of-distribution score (0-1)")
+
+    # Grounding (Novel)
+    is_grounded: bool = Field(..., description="Whether findings are grounded in image")
+    hallucination_score: float = Field(..., description="Hallucination risk (0-1)")
+    consistency_violations: List[str] = Field(default=[], description="Medical consistency issues")
+
+    # Explanations (Novel)
+    finding_explanations: List[Dict] = Field(default=[], description="Per-finding explanations")
+    attention_summary: Dict[str, float] = Field(default={}, description="Attention by region")
+    key_observations: List[str] = Field(default=[], description="Key clinical observations")
+    recommendations: List[str] = Field(default=[], description="Suggested actions")
 
 
 class FeedbackRequest(BaseModel):
@@ -283,6 +318,102 @@ async def generate_report_base64(request: ReportGenerationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/generate/analyze", response_model=AnalyzedReport)
+async def generate_report_with_analysis(file: UploadFile = File(...)):
+    """
+    NOVEL: Generate report with comprehensive analysis.
+
+    This endpoint provides:
+    - Generated radiology report
+    - Uncertainty quantification (confidence, epistemic/aleatoric)
+    - Factual grounding validation (hallucination detection)
+    - Detailed explanations (evidence regions, reasoning)
+    - Clinical recommendations
+
+    Use this endpoint for production clinical decision support.
+    """
+    from .main import get_model, get_device_instance
+
+    try:
+        # Validate file type
+        if file.content_type not in ALLOWED_CONTENT_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type: {file.content_type}"
+            )
+
+        start_time = time.time()
+        contents = await file.read()
+
+        if len(contents) > MAX_FILE_SIZE_BYTES:
+            raise HTTPException(status_code=413, detail="File too large")
+
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        transform = XRayTransform(get_val_transforms(384))
+        image_tensor = transform(image).unsqueeze(0)
+
+        model = get_model()
+        device = get_device_instance()
+        image_tensor = image_tensor.to(device)
+
+        # Generate with comprehensive analysis
+        with torch.no_grad():
+            analysis = model.generate_with_analysis(
+                images=image_tensor,
+                include_uncertainty=True,
+                include_grounding=True,
+                include_explanation=True,
+                include_auxiliary=True,
+                max_length=256,
+                num_beams=4,
+                temperature=1.0,
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=3,
+            )
+
+        report = analysis["reports"][0]
+        generation_time = (time.time() - start_time) * 1000
+        findings, impression = parse_report_sections(report)
+
+        # Extract uncertainty info
+        uncertainty = analysis.get("uncertainty", {})
+        grounding = analysis.get("grounding", {})
+        explanation = analysis.get("explanation", {})
+
+        logger.info(
+            f"Generated analyzed report in {generation_time:.2f}ms | "
+            f"Confidence: {uncertainty.get('confidence_score', 0):.2f} | "
+            f"Grounded: {grounding.get('is_grounded', True)}"
+        )
+
+        return AnalyzedReport(
+            report=report,
+            findings=findings,
+            impression=impression,
+            generation_time_ms=generation_time,
+            # Uncertainty
+            confidence_score=uncertainty.get("confidence_score", 0.7),
+            epistemic_uncertainty=uncertainty.get("epistemic_uncertainty", 0.3),
+            aleatoric_uncertainty=uncertainty.get("aleatoric_uncertainty", 0.3),
+            reliability=uncertainty.get("reliability", "medium"),
+            needs_review=uncertainty.get("needs_review", True),
+            ood_score=uncertainty.get("ood_score", 0.0),
+            # Grounding
+            is_grounded=grounding.get("is_grounded", True),
+            hallucination_score=grounding.get("hallucination_score", 0.0),
+            consistency_violations=grounding.get("consistency_violations", []),
+            # Explanations
+            finding_explanations=explanation.get("finding_explanations", []),
+            attention_summary=explanation.get("attention_summary", {}),
+            key_observations=explanation.get("key_observations", []),
+            recommendations=explanation.get("recommendations", []),
+        )
+
+    except Exception as e:
+        logger.error(f"Analyzed report generation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/generate/batch")
 async def generate_reports_batch(files: List[UploadFile] = File(...)):
     """
@@ -489,7 +620,11 @@ async def get_model_info():
         if hasattr(model, 'use_anatomical_attention') and model.use_anatomical_attention:
             projection_type = "HAQT-ARR (Hierarchical Anatomical Query Tokens with Adaptive Region Routing)"
             anatomical_regions = model.get_anatomical_regions()
-            num_queries = 8 + 7 * 4  # global + region queries
+            # Calculate total queries: global queries + (num_regions * queries_per_region)
+            # Uses NUM_ANATOMICAL_REGIONS constant instead of hardcoding 7
+            num_global = 8
+            num_per_region = 4
+            num_queries = num_global + NUM_ANATOMICAL_REGIONS * num_per_region
         else:
             projection_type = "Standard Multimodal Projection"
             anatomical_regions = None

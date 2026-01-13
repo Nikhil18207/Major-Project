@@ -55,31 +55,43 @@ class AnatomicalCurriculumScheduler:
             difficulty_scorer: Function to score sample difficulty
         """
         if stages is None:
-            # Default curriculum stages
+            # IMPROVED: Extended curriculum stages for better convergence
+            # Longer stages allow the model to fully learn each difficulty level
             self.stages = [
                 {
-                    'name': 'normal_cases',
+                    'name': 'warmup',
                     'epoch_start': 0,
-                    'epoch_end': 5,
+                    'epoch_end': 10,
                     'criteria': {'max_findings': 1, 'severity': 'normal'},
+                    'description': 'Normal/clear cases only - learn basic patterns',
                 },
                 {
-                    'name': 'single_region',
-                    'epoch_start': 5,
-                    'epoch_end': 15,
-                    'criteria': {'max_regions': 1, 'max_findings': 3},
+                    'name': 'easy',
+                    'epoch_start': 10,
+                    'epoch_end': 25,
+                    'criteria': {'max_findings': 2, 'max_regions': 2},
+                    'description': 'Simple abnormalities - single region, few findings',
                 },
                 {
-                    'name': 'multi_region',
-                    'epoch_start': 15,
-                    'epoch_end': 30,
-                    'criteria': {'max_regions': 3, 'max_findings': 5},
-                },
-                {
-                    'name': 'complex_cases',
-                    'epoch_start': 30,
+                    'name': 'medium',
+                    'epoch_start': 25,
                     'epoch_end': 50,
-                    'criteria': {},  # All cases
+                    'criteria': {'max_findings': 4, 'max_regions': 4},
+                    'description': 'Moderate complexity - multiple regions, several findings',
+                },
+                {
+                    'name': 'hard',
+                    'epoch_start': 50,
+                    'epoch_end': 80,
+                    'criteria': {},  # All cases including complex multi-finding
+                    'description': 'Full complexity - all samples including complex cases',
+                },
+                {
+                    'name': 'finetune',
+                    'epoch_start': 80,
+                    'epoch_end': 100,
+                    'criteria': {},  # All cases with focus on difficult ones
+                    'description': 'Fine-tuning on full dataset',
                 },
             ]
         else:
@@ -193,7 +205,9 @@ class AnatomicalCurriculumScheduler:
         Returns:
             List of sample indices for this stage
         """
-        cache_key = f"{stage_name}_{len(dataset)}"
+        # Include dataset identity in cache key to prevent stale indices
+        # when dataset is recreated with same length but different samples
+        cache_key = f"{stage_name}_{len(dataset)}_{id(dataset)}"
 
         if cache_key in self._stage_indices_cache:
             return self._stage_indices_cache[cache_key]

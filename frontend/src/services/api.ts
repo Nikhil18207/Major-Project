@@ -21,7 +21,9 @@ import type {
   AttentionVisualization,
 } from '../types'
 
-const API_BASE_URL = '/api/v1'
+// Use environment variable for API base URL with fallback for development
+// Set VITE_API_URL in .env or .env.production for different environments
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1'
 
 // Timeout settings for different request types
 const DEFAULT_TIMEOUT = 30000  // 30 seconds for normal requests

@@ -10,7 +10,7 @@
  * Authors: S. Nikhil, Dadhania Omkumar
  */
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { motion, AnimatePresence } from 'framer-motion'
 import toast from 'react-hot-toast'
@@ -32,7 +32,7 @@ import { cn } from '../utils/cn'
 import { generateReport, submitFeedback, getAttentionVisualization, isHAQTARREnabled } from '../services/api'
 import useStore from '../store/useStore'
 import type { GeneratedReport, AttentionVisualization, AnatomicalRegion } from '../types'
-import { ANATOMICAL_REGION_DISPLAY } from '../types'
+import { ANATOMICAL_REGION_DISPLAY, isAnatomicalRegion } from '../types'
 
 export default function ReportGenerator() {
   const { settings, addToHistory, setIsGenerating, isGenerating } = useStore()
@@ -59,14 +59,25 @@ export default function ReportGenerator() {
     isHAQTARREnabled().then(setHaqtEnabled).catch(() => setHaqtEnabled(false))
   }, [])
 
+  // Ref to track the latest previewUrl for reliable cleanup
+  // This ensures cleanup always has access to the current URL, even on rapid updates
+  const previewUrlRef = useRef<string | null>(null)
+
+  // Update ref whenever previewUrl changes
+  useEffect(() => {
+    previewUrlRef.current = previewUrl
+  }, [previewUrl])
+
   // Cleanup preview URL on unmount to prevent memory leak
+  // Using ref ensures we always clean up the latest URL, handling edge cases where
+  // previewUrl might change rapidly or state updates are batched
   useEffect(() => {
     return () => {
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl)
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current)
       }
     }
-  }, [previewUrl])
+  }, []) // Empty deps - cleanup only needs to run on unmount
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0]
@@ -582,11 +593,15 @@ function ReportSection({
 // HAQT-ARR Attention Visualization Panel (Novel)
 function AttentionVisualizationPanel({ data }: { data: AttentionVisualization }) {
   // Sort regions by weight (descending)
+  // Use type guard to safely validate regions from API response
   const sortedRegions = data.anatomical_regions
     .map((region, index) => ({
-      region: region as AnatomicalRegion,
+      region: region as string,
       weight: data.region_weights[index],
     }))
+    .filter((item): item is { region: AnatomicalRegion; weight: number } =>
+      isAnatomicalRegion(item.region)
+    )
     .sort((a, b) => b.weight - a.weight)
 
   const maxWeight = Math.max(...data.region_weights)
