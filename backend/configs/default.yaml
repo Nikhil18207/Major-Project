@@ -94,9 +94,10 @@ training:
   scheduled_sampling_end: 0.4             # IMPROVED: Lower end ratio
   scheduled_sampling_warmup: 10           # IMPROVED: Longer warmup
 
-  # IMPROVED: R-Drop regularization (NEW)
-  use_rdrop: true
-  rdrop_alpha: 0.7                        # R-Drop loss weight
+  # R-Drop regularization (DISABLED for faster training)
+  # Can be enabled later for final model to squeeze extra 1-2% metrics
+  use_rdrop: false
+  rdrop_alpha: 0.7                        # R-Drop loss weight (only used if use_rdrop: true)
 
   # Region weight regularization
   use_region_regularization: true

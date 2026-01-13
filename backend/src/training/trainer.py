@@ -158,7 +158,7 @@ class XR2TextTrainer:
             logger.info("Clinical validation enabled")
 
         # IMPROVED: R-Drop regularization for better generation
-        self.use_rdrop = config.get("use_rdrop", True)
+        self.use_rdrop = config.get("use_rdrop", False)  # Disabled by default for faster training
         self.rdrop_alpha = config.get("rdrop_alpha", 0.7)
         if self.use_rdrop:
             logger.info(f"R-Drop regularization enabled with alpha={self.rdrop_alpha}")
