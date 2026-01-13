@@ -599,6 +599,21 @@ class XR2TextTrainer:
                 self.optimizer.zero_grad()
                 self.global_step += 1
 
+                # GPU Temperature Check - pause if overheating
+                if self.enable_temp_monitoring and self.global_step % self.temp_check_interval == 0:
+                    current_temp = get_gpu_temperature()
+                    if current_temp is not None:
+                        if current_temp >= self.max_gpu_temp:
+                            logger.error(f"GPU temp {current_temp}°C >= max {self.max_gpu_temp}°C! Stopping.")
+                            raise RuntimeError(f"GPU overheated: {current_temp}°C")
+                        elif current_temp >= self.pause_gpu_temp:
+                            logger.warning(f"GPU temp {current_temp}°C >= pause threshold. Cooling down for {self.gpu_cooldown_time}s...")
+                            torch.cuda.empty_cache()
+                            import time
+                            time.sleep(self.gpu_cooldown_time)
+                        elif current_temp >= self.warning_gpu_temp:
+                            logger.warning(f"GPU temp {current_temp}°C - approaching limit")
+
                 # Update progress bar only on optimization steps
                 progress_bar.update(1)
                 progress_bar.set_postfix({

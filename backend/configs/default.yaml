@@ -175,7 +175,7 @@ training:
   max_gpu_temp: 95                        # Stop training at 95C
   warning_gpu_temp: 85                    # Warn at 85C
   pause_gpu_temp: 91                      # Pause at 91C
-  temp_check_interval: 50                 # Check every 50 batches
+  temp_check_interval: 10                 # Check every 10 optimizer steps (more frequent)
   gpu_cooldown_time: 30                   # 30 second cooldown
 
   # Checkpointing
