@@ -20,7 +20,7 @@ model:
 
   # HAQT-ARR Projection Layer (Novel Contribution)
   projection:
-    language_dim: 768
+    language_dim: 1024                # FIXED: Must match BioBART-Large hidden dim
     num_regions: 7
     num_global_queries: 8
     num_region_queries: 4
@@ -37,7 +37,7 @@ model:
     use_residual: true
 
   decoder:
-    model_name: "biobart"
+    model_name: "biobart-large"       # FIXED: Use BioBART-Large for better generation
     max_length: 512
     freeze_embeddings: false
     freeze_layers: 0
@@ -46,12 +46,12 @@ model:
 
 # Training Configuration - BULLETPROOF FOR RTX 4060 (8GB VRAM)
 training:
-  epochs: 30  # Reduced for laptop GPU
-  batch_size: 2  # VERY CONSERVATIVE for 8GB VRAM + temperature safety
-  learning_rate: 5.0e-5
-  weight_decay: 0.01
-  warmup_steps: 500
-  gradient_accumulation_steps: 16  # Effective batch size = 2 * 16 = 32
+  epochs: 100                         # FIXED: Full training for curriculum learning
+  batch_size: 1                       # FIXED: BioBART-Large needs batch_size=1 for 8GB VRAM
+  learning_rate: 1.0e-4               # FIXED: Higher LR for faster convergence
+  weight_decay: 0.05                  # FIXED: More regularization
+  warmup_steps: 1000                  # FIXED: Longer warmup
+  gradient_accumulation_steps: 32     # FIXED: Effective batch size = 1 * 32 = 32
   max_grad_norm: 1.0
   use_amp: true  # ESSENTIAL - Mixed precision reduces memory and heat
 
@@ -68,6 +68,10 @@ training:
 
   use_region_regularization: true
   region_regularization_weight: 0.01
+
+  # R-Drop regularization (DISABLED for 2x faster training)
+  use_rdrop: false
+  rdrop_alpha: 0.7
 
   # NOVEL: Novel loss functions (can disable to reduce compute/heat)
   use_novel_losses: true
@@ -96,7 +100,7 @@ training:
 
   # MEMORY OPTIMIZATION (BULLETPROOF OOM PREVENTION)
   gradient_checkpointing: true  # Enables gradient checkpointing in encoder (saves ~30% VRAM)
-  validate_every: 3  # Validate every 3 epochs instead of every epoch
+  validate_every: 2  # FIXED: Validate every 2 epochs to see BLEU-4 and ROUGE-L
   val_fraction: 0.25  # Use only 25% of validation set during training
 
   # OOM Recovery (NEW)
@@ -148,32 +152,30 @@ logging:
   log_to_console: true
 
 # ============================================
-# RTX 4060 SAFETY NOTES:
+# RTX 4060 SAFETY NOTES (Updated for BioBART-Large):
 # ============================================
-# 1. Batch size is set to 2 (very conservative)
-#    - If you get OOM errors, reduce to 1
-#    - If temperature stays low (<70°C), can try batch_size: 3
+# 1. Batch size is set to 1 (required for BioBART-Large 8GB VRAM)
+#    - gradient_accumulation_steps: 32 gives effective batch of 32
+#    - R-Drop DISABLED for 2x faster training
 #
 # 2. Temperature monitoring will automatically:
-#    - Warn at 75°C
-#    - Pause training at 80°C
-#    - Stop if reaches 83°C (throttle temp)
+#    - Warn at 85°C
+#    - Pause training at 90°C
+#    - Stop if reaches 95°C (safety limit)
 #
 # 3. If overheating occurs:
-#    - Reduce batch_size to 1
-#    - Increase gradient_accumulation_steps to 32
 #    - Disable novel losses temporarily
 #    - Ensure laptop has good ventilation
 #    - Consider using a cooling pad
 #
 # 4. Monitor GPU temperature:
 #    - Check nvidia-smi periodically
-#    - Training will log temperature every 10 batches
+#    - Training will log temperature every 50 batches
 #    - Watch for repeated pauses (indicates need for adjustment)
 #
 # 5. Performance tips:
 #    - Keep laptop elevated for better airflow
 #    - Close other GPU-intensive applications
 #    - Use Windows "High Performance" power plan
-#    - Consider reducing image_size to 256 if needed
+#    - gradient_checkpointing: true saves ~30% VRAM
 

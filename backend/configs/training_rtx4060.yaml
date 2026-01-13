@@ -20,7 +20,7 @@ model:
 
   # HAQT-ARR Projection Layer (Novel) - Memory Optimized
   projection:
-    language_dim: 768
+    language_dim: 1024                # FIXED: Must match BioBART-Large hidden dim
     # HAQT-ARR parameters
     num_regions: 7              # 7 anatomical regions
     num_global_queries: 8       # Global context queries
@@ -40,21 +40,21 @@ model:
     use_residual: true
 
   decoder:
-    model_name: "biobart"
+    model_name: "biobart-large"       # FIXED: Use BioBART-Large for better generation
     max_length: 256  # Reduced for memory
     freeze_embeddings: false
-    freeze_layers: 2  # Freeze first 2 decoder layers
+    freeze_layers: 0  # Don't freeze decoder layers for full fine-tuning
     use_cache: false  # Disable KV cache during training
     dropout: 0.1
 
 # Training Configuration - Optimized for RTX 4060 with Novel Improvements
 training:
-  epochs: 30
-  batch_size: 4  # Small batch for 8GB VRAM with HAQT-ARR
-  learning_rate: 5.0e-5  # Lower LR for stability
-  weight_decay: 0.01
-  warmup_steps: 500
-  gradient_accumulation_steps: 8  # Effective batch size = 4 * 8 = 32
+  epochs: 100                         # FIXED: Full training for curriculum learning
+  batch_size: 1                       # FIXED: BioBART-Large needs batch_size=1 for 8GB VRAM
+  learning_rate: 1.0e-4               # FIXED: Higher LR for faster convergence
+  weight_decay: 0.05                  # FIXED: More regularization
+  warmup_steps: 1000                  # FIXED: Longer warmup
+  gradient_accumulation_steps: 32     # FIXED: Effective batch size = 1 * 32 = 32
   max_grad_norm: 1.0
   use_amp: true  # Essential for RTX 4060
 
@@ -75,10 +75,20 @@ training:
   # Region weight regularization for balanced anatomical attention
   use_region_regularization: true
   region_regularization_weight: 0.01  # Entropy-based regularization
-  
+
+  # R-Drop regularization (DISABLED for 2x faster training)
+  use_rdrop: false
+  rdrop_alpha: 0.7
+
+  # Gradient checkpointing for memory efficiency
+  gradient_checkpointing: true
+
+  # Validation settings
+  validate_every: 2                       # Validate every 2 epochs to see BLEU-4 and ROUGE-L
+
   checkpoint_dir: "checkpoints"
-  save_every: 3
-  log_every: 50
+  save_every: 5
+  log_every: 100
   experiment_name: "xr2text_haqt_arr_rtx4060"
 
   # Temperature monitoring - pause only at 90°C (very high threshold)
@@ -108,10 +118,11 @@ generation:
   early_stopping: true
   do_sample: false
 
-# Memory Optimization Tips for RTX 4060:
-# - Use batch_size: 4 with gradient_accumulation_steps: 8
+# Memory Optimization Tips for RTX 4060 with BioBART-Large:
+# - Use batch_size: 1 with gradient_accumulation_steps: 32
 # - Enable use_amp: true for mixed precision
-# - Freeze encoder layers (freeze_layers: 2)
+# - Enable gradient_checkpointing: true
 # - Reduce max_length to 256
 # - Disable decoder KV cache during training
 # - Use num_workers: 2 for data loading
+# - R-Drop disabled for 2x faster training
