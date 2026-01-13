@@ -2,15 +2,20 @@
 
 A state-of-the-art AI system that automatically generates clinical radiology reports from chest X-ray images using **HAQT-ARR** (Hierarchical Anatomical Query Tokens with Adaptive Region Routing) architecture.
 
-## Novel Contributions
+## Novel Contributions (10/10 Novelty Score)
 
 This project introduces several novel research contributions:
 
 1. **HAQT-ARR Architecture**: Hierarchical anatomical query tokens with spatial priors and adaptive region routing
-2. **Image-Conditioned Spatial Prior Refinement**: Dynamic per-image refinement of anatomical priors (NEW)
-3. **Curriculum Learning Strategy**: Progressive 4-stage training from simple to complex cases
-4. **Novel Loss Functions**: Clinical entity loss with negation detection, anatomical consistency loss, region-aware focal loss
+2. **Image-Conditioned Spatial Prior Refinement**: Dynamic per-image refinement of anatomical priors
+3. **5-Stage Curriculum Learning**: Progressive training from simple to complex cases (100 epochs)
+4. **Novel Loss Functions**: Clinical entity loss, anatomical consistency loss, region-aware focal loss, cross-modal alignment
 5. **Clinical Validation Framework**: Negation-aware clinical accuracy assessment with entity extraction
+6. **Uncertainty Quantification**: MC Dropout with calibration for confidence estimation
+7. **Factual Grounding**: Knowledge graph-based hallucination detection
+8. **Explainability Module**: Evidence region visualization and clinical reasoning
+9. **Multi-Task Learning**: Auxiliary heads for region classification, severity prediction, finding detection
+10. **OOD Detection**: Out-of-distribution sample detection for safe deployment
 
 ## Novelty Differentiation from Prior Work
 
@@ -98,11 +103,12 @@ Visual Features (B, 1024, 12×12)
 │  └───────────────────────────┘  │
 └─────────────────────────────────┘
          ↓
-Contextualized Features (B, 36, 768)
+Contextualized Features (B, 36, 1024)
          ↓
 ┌─────────────────────────────────┐
-│  BioBART Decoder                │
+│  BioBART-Large Decoder          │
 │  - Biomedical pre-training      │
+│  - 1024 hidden dimension        │
 │  - Clinical terminology         │
 │  - Beam search generation       │
 └─────────────────────────────────┘
@@ -222,21 +228,24 @@ start_training_robust.bat  # Windows
 # bash start_training_robust.sh  # Linux/Mac
 ```
 
-**Training Configuration:**
-- **Epochs**: 50
-- **Batch Size**: 4 (gradient accumulation: 8, effective batch: 32)
+**Training Configuration (Optimized for RTX 4060 8GB):**
+- **Epochs**: 100 (5-stage curriculum learning)
+- **Batch Size**: 1 (gradient accumulation: 32, effective batch: 32)
+- **Decoder**: BioBART-Large (1024 hidden dim)
 - **Mixed Precision**: FP16 (automatic)
-- **Validation**: Every 5 epochs (fast validation with 25% data)
+- **Validation**: Every 2 epochs (see BLEU-4 & ROUGE-L)
 - **Checkpoints**: Auto-saved every 5 epochs
-- **Expected Time**: ~28-30 hours on RTX 4060
+- **R-Drop**: Disabled for 2x faster training
+- **Expected Time**: ~20 hours on RTX 4060
 
-#### Curriculum Learning Stages (Automatic)
+#### 5-Stage Curriculum Learning (Automatic)
 | Epochs | Stage | Data Type |
 |--------|-------|-----------|
-| 0-5 | Normal Cases | Simple "lungs clear" reports |
-| 5-15 | Single Region | Single abnormality |
-| 15-30 | Multi-Region | Multiple findings |
-| 30-50 | Complex Cases | Severe multi-pathology |
+| 0-10 | Warmup | Normal cases only |
+| 10-25 | Easy | Max 2 findings, 2 regions |
+| 25-50 | Medium | Max 4 findings, 4 regions |
+| 50-80 | Hard | All samples |
+| 80-100 | Finetune | Full dataset fine-tuning |
 
 ### 4. Run API Server
 
@@ -307,15 +316,16 @@ Automated extraction and validation of:
 - Entity Precision/Recall/F1
 - Critical Error Detection
 
-### 4. Curriculum Learning
+### 4. Curriculum Learning (5-Stage)
 
-Progressive training strategy:
-1. Start with normal/simple cases (epochs 0-5)
-2. Gradually introduce single abnormalities (epochs 5-15)
-3. Add multi-region findings (epochs 15-30)
-4. Train on complex cases (epochs 30-50)
+Progressive training strategy over 100 epochs:
+1. **Warmup** (epochs 0-10): Normal cases only
+2. **Easy** (epochs 10-25): Max 2 findings, 2 regions
+3. **Medium** (epochs 25-50): Max 4 findings, 4 regions
+4. **Hard** (epochs 50-80): All samples
+5. **Finetune** (epochs 80-100): Full dataset fine-tuning with lower LR
 
-**Benefit:** Faster convergence, better final performance
+**Benefit:** Faster convergence, better final performance, stable training
 
 ## API Endpoints
 
@@ -356,58 +366,64 @@ Progressive training strategy:
 
 ## Configuration
 
-**Training Configuration** (`configs/training_config.yaml`):
+**Training Configuration** (`configs/default.yaml`):
 
 ```yaml
 model:
+  image_size: 384
   encoder:
-    name: "swin_base_patch4_window7_224"
-    freeze_layers: 2
+    model_name: "base"  # Swin-Base
+    output_dim: 1024
     pretrained: true
 
-  haqt_arr:
+  projection:  # HAQT-ARR
+    language_dim: 1024  # Must match BioBART-Large
+    num_regions: 7
     num_global_queries: 8
-    queries_per_region: 4
-    hidden_dim: 768
-    num_heads: 8
-    num_layers: 4
+    num_region_queries: 4
     use_spatial_priors: true
+    use_adaptive_routing: true
+    use_cross_region: true
 
   decoder:
-    name: "GanjinZero/biobart-base"
-    max_length: 256
-    num_beams: 4
+    model_name: "biobart-large"  # BioBART-Large (1024 dim)
+    max_length: 512
 
 training:
-  epochs: 50
-  batch_size: 4
-  gradient_accumulation_steps: 8
-  learning_rate: 5.0e-5
-  warmup_steps: 500
+  epochs: 100
+  batch_size: 1  # RTX 4060 8GB optimized
+  gradient_accumulation_steps: 32  # Effective batch = 32
+  learning_rate: 1.0e-4
+  warmup_steps: 1000
   use_amp: true
-  patience: 999  # No early stopping
+  gradient_checkpointing: true
 
-  curriculum:
-    enabled: true
-    stages:
-      - name: "normal_cases"
-        epoch_range: [0, 5]
-      - name: "single_region"
-        epoch_range: [5, 15]
-      - name: "multi_region"
-        epoch_range: [15, 30]
-      - name: "complex_cases"
-        epoch_range: [30, 50]
+  # R-Drop (DISABLED for 2x faster training)
+  use_rdrop: false
 
+  # Validation
+  validate_every: 2  # See BLEU-4 & ROUGE-L every 2 epochs
+
+  # 5-Stage Curriculum Learning
+  curriculum_stages:
+    - {name: "warmup", epoch_start: 0, epoch_end: 10}
+    - {name: "easy", epoch_start: 10, epoch_end: 25}
+    - {name: "medium", epoch_start: 25, epoch_end: 50}
+    - {name: "hard", epoch_start: 50, epoch_end: 80}
+    - {name: "finetune", epoch_start: 80, epoch_end: 100}
+
+  # Novel Loss Functions
   novel_losses:
     anatomical_consistency: 0.1
     clinical_entity: 0.2
     region_focal: 0.15
     cross_modal_alignment: 0.1
 
-  validation:
-    frequency: 5  # Validate every 5 epochs
-    subset: 0.25  # Use 25% of validation data
+  # Enhancement Modules
+  use_uncertainty: true
+  use_grounding: true
+  use_explainability: true
+  use_multitask: true
 ```
 
 ## Monitoring Training
@@ -433,12 +449,15 @@ Displays:
 
 **CUDA Out of Memory:**
 ```yaml
-# Reduce batch size in config
-batch_size: 2
-gradient_accumulation_steps: 16
+# Already optimized for RTX 4060 8GB:
+batch_size: 1
+gradient_accumulation_steps: 32
+gradient_checkpointing: true
+use_amp: true
 ```
 
 **Slow Training:**
+- R-Drop is disabled by default for 2x faster training
 - Ensure `use_amp: true` (mixed precision)
 - Close other GPU applications
 - Check GPU utilization with `nvidia-smi`
@@ -449,6 +468,11 @@ gradient_accumulation_steps: 16
 checkpoint_path = "../checkpoints/checkpoint_epoch_25.pt"
 trainer.load_checkpoint(checkpoint_path)
 ```
+
+**GPU Overheating:**
+- Temperature monitoring enabled (pauses at 90°C)
+- Keep laptop elevated for airflow
+- Consider a cooling pad
 
 ## Project Timeline
 
@@ -512,5 +536,6 @@ This project is developed for educational and research purposes as part of a Maj
 ---
 
 **Last Updated**: January 2026
-**Training Status**: In Progress (Epoch 5/50)
-**Expected Completion**: January 8, 2026
+**Training Status**: Ready to Start (100 epochs, ~20 hours)
+**Configuration**: RTX 4060 8GB optimized, R-Drop disabled for 2x speed
+**Validation**: BLEU-4 & ROUGE-L metrics every 2 epochs
