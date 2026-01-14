@@ -69,8 +69,8 @@ training:
   batch_size: 1                           # IMPROVED: Reduced for RTX 4060 with larger model
   learning_rate: 1.0e-4                   # IMPROVED: Higher LR for faster convergence
   weight_decay: 0.05                      # IMPROVED: More regularization
-  warmup_steps: 1000                      # IMPROVED: Longer warmup
-  gradient_accumulation_steps: 32         # IMPROVED: Effective batch = 32
+  warmup_steps: 500                       # REDUCED: Fewer total steps now
+  gradient_accumulation_steps: 64         # DOUBLED: Effective batch = 64, halves steps per epoch
   max_grad_norm: 1.0
   use_amp: true                           # Essential for RTX 4060
 
