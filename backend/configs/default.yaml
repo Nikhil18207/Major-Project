@@ -65,7 +65,7 @@ model:
 
 # Training Configuration - OPTIMIZED FOR RTX 4060 8GB
 training:
-  epochs: 100                             # IMPROVED: Full training with finetune stage
+  epochs: 50                              # REDUCED: 50 epochs is enough for good results
   batch_size: 1                           # IMPROVED: Reduced for RTX 4060 with larger model
   learning_rate: 1.0e-4                   # IMPROVED: Higher LR for faster convergence
   weight_decay: 0.05                      # IMPROVED: More regularization
@@ -114,28 +114,28 @@ training:
   focal_loss_weight: 0.15
   alignment_loss_weight: 0.1
 
-  # NOVEL: Curriculum learning with IMPROVED stages
+  # NOVEL: Curriculum learning - COMPRESSED for 50 epochs
   use_curriculum_learning: true
   curriculum_stages:
     - name: "warmup"
       epoch_start: 0
-      epoch_end: 10
+      epoch_end: 5
       criteria: {max_findings: 1, severity: "normal"}
     - name: "easy"
-      epoch_start: 10
-      epoch_end: 25
+      epoch_start: 5
+      epoch_end: 12
       criteria: {max_findings: 2, max_regions: 2}
     - name: "medium"
-      epoch_start: 25
-      epoch_end: 50
+      epoch_start: 12
+      epoch_end: 25
       criteria: {max_findings: 4, max_regions: 4}
     - name: "hard"
-      epoch_start: 50
-      epoch_end: 80
+      epoch_start: 25
+      epoch_end: 40
       criteria: {}  # All samples
     - name: "finetune"
-      epoch_start: 80
-      epoch_end: 100
+      epoch_start: 40
+      epoch_end: 50
       criteria: {}  # Full dataset fine-tuning with lower LR
 
   # NOVEL: Clinical validation
