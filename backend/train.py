@@ -13,8 +13,8 @@ Usage:
     # Train with default config
     python train.py
 
-    # Train with custom config
-    python train.py --config configs/training_rtx4060.yaml
+    # Train with custom config (if needed)
+    python train.py --config configs/default.yaml
 
     # Resume training from checkpoint
     python train.py --resume checkpoints/checkpoint_epoch_10.pt

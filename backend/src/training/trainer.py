@@ -148,7 +148,9 @@ class XR2TextTrainer:
         # NOVEL: Curriculum learning
         self.use_curriculum = config.get("use_curriculum_learning", True)
         if self.use_curriculum:
-            self.curriculum_scheduler = AnatomicalCurriculumScheduler()
+            # FIXED: Pass curriculum stages from config instead of using hardcoded defaults
+            curriculum_stages = config.get("curriculum_stages", None)
+            self.curriculum_scheduler = AnatomicalCurriculumScheduler(stages=curriculum_stages)
             logger.info("Curriculum learning enabled")
         
         # NOVEL: Clinical validation
@@ -177,6 +179,13 @@ class XR2TextTrainer:
                 f"GPU temperature monitoring enabled: "
                 f"pause at {self.pause_gpu_temp}°C, max {self.max_gpu_temp}°C"
             )
+
+        # CUBLAS Error Recovery - retry on random CUDA crashes
+        self.cublas_retry_enabled = config.get("cublas_retry_enabled", True)
+        self.cublas_max_retries = config.get("cublas_max_retries", 3)
+        self.cublas_retry_delay = config.get("cublas_retry_delay", 10)
+        if self.cublas_retry_enabled:
+            logger.info(f"CUBLAS error recovery enabled: {self.cublas_max_retries} retries with {self.cublas_retry_delay}s delay")
 
         # Checkpointing
         self.checkpoint_dir = Path(config.get("checkpoint_dir", "checkpoints"))
@@ -358,14 +367,22 @@ class XR2TextTrainer:
             logger.warning(f"R-Drop loss computation failed: {e}, returning 0")
             return torch.tensor(0.0, device=logits1.device, requires_grad=True)
 
-    def train(self) -> Dict[str, float]:
+    def train(self, start_epoch: int = 0) -> Dict[str, float]:
         """
         Run the complete training loop.
+
+        Args:
+            start_epoch: Starting epoch (for resume functionality)
 
         Returns:
             Dictionary with final metrics
         """
         logger.info("Starting training...")
+
+        # Support start_epoch parameter for resume functionality
+        if start_epoch > 0:
+            self.current_epoch = start_epoch
+            logger.info(f"Resuming from epoch {start_epoch}")
 
         for epoch in range(self.current_epoch, self.epochs):
             self.current_epoch = epoch
@@ -560,21 +577,72 @@ class XR2TextTrainer:
                         self.region_weight_history.append(region_weights)
 
             except RuntimeError as e:
-                if "out of memory" in str(e).lower() and self.oom_recovery_enabled:
-                    # OOM Recovery: Clear cache and skip batch
+                error_str = str(e).lower()
+
+                # OOM Recovery - more robust handling
+                if "out of memory" in error_str and self.oom_recovery_enabled:
                     oom_count += 1
                     logger.warning(f"OOM at batch {batch_idx}, clearing cache and skipping (OOM count: {oom_count})")
 
-                    # Clear all GPU memory
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    gc.collect()
+                    # Aggressive memory cleanup
+                    try:
+                        self.optimizer.zero_grad(set_to_none=True)  # More aggressive than zero_grad()
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()  # Wait for all CUDA ops to complete
+                            torch.cuda.empty_cache()
 
-                    # Zero gradients to prevent corrupt state
-                    self.optimizer.zero_grad()
+                        # If OOM happens multiple times, wait to let memory settle
+                        if oom_count >= 2:
+                            import time
+                            logger.warning(f"Multiple OOMs ({oom_count}), waiting 10s for memory to settle...")
+                            time.sleep(10)
+                            gc.collect()
+                            torch.cuda.empty_cache()
 
-                    # Skip this batch
-                    continue
+                    except Exception as cache_error:
+                        logger.error(f"Cache clearing failed: {cache_error}. Waiting 30s...")
+                        import time
+                        time.sleep(30)  # Long wait to let GPU recover
+                        gc.collect()
+
+                    # Skip this batch if OOM count is reasonable, otherwise stop
+                    if oom_count <= 5:
+                        continue
+                    else:
+                        logger.error(f"Too many OOMs ({oom_count}), stopping to prevent corruption")
+                        raise e
+
+                # CUBLAS Error Recovery - retry on CUDA crashes
+                elif ("cublas" in error_str or "cuda error" in error_str) and self.cublas_retry_enabled:
+                    if not hasattr(self, '_cublas_retry_count'):
+                        self._cublas_retry_count = 0
+
+                    self._cublas_retry_count += 1
+
+                    if self._cublas_retry_count <= self.cublas_max_retries:
+                        logger.warning(
+                            f"CUBLAS/CUDA error at batch {batch_idx}. "
+                            f"Retry {self._cublas_retry_count}/{self.cublas_max_retries}. "
+                            f"Waiting {self.cublas_retry_delay}s..."
+                        )
+
+                        # Clear GPU memory and wait
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                        gc.collect()
+
+                        import time
+                        time.sleep(self.cublas_retry_delay)
+
+                        # Zero gradients and retry
+                        self.optimizer.zero_grad()
+                        continue
+                    else:
+                        logger.error(f"CUBLAS error persists after {self.cublas_max_retries} retries. Failing.")
+                        self._cublas_retry_count = 0
+                        raise e
                 else:
                     raise e
 
@@ -598,6 +666,16 @@ class XR2TextTrainer:
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 self.global_step += 1
+
+                # Reset CUBLAS retry counter on successful step
+                if hasattr(self, '_cublas_retry_count'):
+                    self._cublas_retry_count = 0
+
+                # Periodic cache clearing to prevent memory fragmentation (every 10 optimizer steps)
+                if self.global_step % 10 == 0:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
 
                 # GPU Temperature Check - pause if overheating
                 if self.enable_temp_monitoring and self.global_step % self.temp_check_interval == 0:
@@ -765,6 +843,70 @@ class XR2TextTrainer:
 
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
         logger.info(f"Resuming from epoch {self.current_epoch}")
+
+    def evaluate(
+        self,
+        test_loader: DataLoader,
+        generation_config: Optional[Dict] = None,
+    ) -> Dict[str, float]:
+        """
+        Evaluate model on test set.
+
+        Args:
+            test_loader: Test data loader
+            generation_config: Optional generation config for better inference
+
+        Returns:
+            Dictionary with evaluation metrics
+        """
+        self.model.eval()
+
+        # Use provided generation config or defaults
+        gen_config = generation_config or {}
+
+        all_predictions = []
+        all_references = []
+        total_loss = 0.0
+
+        logger.info("Running final evaluation on test set...")
+
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc="Evaluating"):
+                images = batch["images"].to(self.device)
+                input_ids = batch["input_ids"].to(self.device)
+                labels = batch["labels"].to(self.device)
+                raw_texts = batch.get("raw_text", [""] * len(images))
+
+                # Generate text using model's generate method
+                generated_texts = self.model.generate(
+                    images,
+                    max_length=gen_config.get('max_length', 256),
+                    min_length=gen_config.get('min_length', 30),
+                    num_beams=gen_config.get('num_beams', 4),
+                    length_penalty=gen_config.get('length_penalty', 1.2),
+                    repetition_penalty=gen_config.get('repetition_penalty', 1.5),
+                    no_repeat_ngram_size=gen_config.get('no_repeat_ngram_size', 4),
+                    early_stopping=gen_config.get('early_stopping', True),
+                )
+
+                all_predictions.extend(generated_texts)
+                all_references.extend(raw_texts)
+
+        # Compute all metrics
+        metrics = compute_metrics(all_predictions, all_references, include_all=True)
+
+        # Clinical validation
+        if self.use_clinical_validation:
+            clinical_results = self.clinical_validator.batch_validate(
+                all_predictions,
+                all_references,
+            )
+            metrics["clinical_accuracy"] = clinical_results["average_clinical_accuracy"]
+            metrics["clinical_f1"] = clinical_results["average_f1"]
+            metrics["clinical_precision"] = clinical_results["average_precision"]
+            metrics["clinical_recall"] = clinical_results["average_recall"]
+
+        return metrics
 
     def _get_final_metrics(self) -> Dict[str, float]:
         """Get final training metrics."""

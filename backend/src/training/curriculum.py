@@ -55,41 +55,41 @@ class AnatomicalCurriculumScheduler:
             difficulty_scorer: Function to score sample difficulty
         """
         if stages is None:
-            # IMPROVED: Extended curriculum stages for better convergence
-            # Longer stages allow the model to fully learn each difficulty level
+            # DEFAULT: 50-epoch curriculum stages (matches default.yaml)
+            # These are used when no explicit stages are provided
             self.stages = [
                 {
                     'name': 'warmup',
                     'epoch_start': 0,
-                    'epoch_end': 10,
+                    'epoch_end': 5,
                     'criteria': {'max_findings': 1, 'severity': 'normal'},
                     'description': 'Normal/clear cases only - learn basic patterns',
                 },
                 {
                     'name': 'easy',
-                    'epoch_start': 10,
-                    'epoch_end': 25,
+                    'epoch_start': 5,
+                    'epoch_end': 12,
                     'criteria': {'max_findings': 2, 'max_regions': 2},
                     'description': 'Simple abnormalities - single region, few findings',
                 },
                 {
                     'name': 'medium',
-                    'epoch_start': 25,
-                    'epoch_end': 50,
+                    'epoch_start': 12,
+                    'epoch_end': 25,
                     'criteria': {'max_findings': 4, 'max_regions': 4},
                     'description': 'Moderate complexity - multiple regions, several findings',
                 },
                 {
                     'name': 'hard',
-                    'epoch_start': 50,
-                    'epoch_end': 80,
+                    'epoch_start': 25,
+                    'epoch_end': 40,
                     'criteria': {},  # All cases including complex multi-finding
                     'description': 'Full complexity - all samples including complex cases',
                 },
                 {
                     'name': 'finetune',
-                    'epoch_start': 80,
-                    'epoch_end': 100,
+                    'epoch_start': 40,
+                    'epoch_end': 50,
                     'criteria': {},  # All cases with focus on difficult ones
                     'description': 'Fine-tuning on full dataset',
                 },

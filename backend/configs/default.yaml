@@ -70,7 +70,7 @@ training:
   learning_rate: 1.0e-4                   # IMPROVED: Higher LR for faster convergence
   weight_decay: 0.05                      # IMPROVED: More regularization
   warmup_steps: 500                       # REDUCED: Fewer total steps now
-  gradient_accumulation_steps: 64         # DOUBLED: Effective batch = 64, halves steps per epoch
+  gradient_accumulation_steps: 128        # ~240 steps/epoch, ~65 hours total (2.7 days)
   max_grad_norm: 1.0
   use_amp: true                           # Essential for RTX 4060
 
@@ -81,8 +81,8 @@ training:
   # Early stopping
   patience: 20                            # IMPROVED: More patience
 
-  # Validation
-  val_fraction: 0.15
+  # Validation - OPTIMIZED FOR SPEED
+  val_fraction: 0.10                      # Reduced: 10% of val set for faster validation
   validate_every: 2                       # Validate every 2 epochs
 
   # IMPROVED: Reduced label smoothing
@@ -174,13 +174,22 @@ training:
   enable_temp_monitoring: true            # IMPROVED: Enable monitoring
   max_gpu_temp: 95                        # Stop training at 95C
   warning_gpu_temp: 85                    # Warn at 85C
-  pause_gpu_temp: 91                      # Pause at 91C
-  temp_check_interval: 10                 # Check every 10 optimizer steps (more frequent)
-  gpu_cooldown_time: 30                   # 30 second cooldown
+  pause_gpu_temp: 88                      # Pause at 88C (was 91) - slightly more conservative
+  temp_check_interval: 5                  # Check every 5 optimizer steps (was 10) - more frequent
+  gpu_cooldown_time: 45                   # 45 second cooldown (was 30)
+
+  # CUBLAS Error Recovery (NEW - prevents random CUDA crashes)
+  cublas_retry_enabled: true              # Retry on CUBLAS errors
+  cublas_max_retries: 3                   # Number of retries before failing
+  cublas_retry_delay: 10                  # Seconds to wait between retries
+
+  # Memory Management (NEW - prevents OOM from memory fragmentation)
+  clear_cache_every_steps: 10             # Clear CUDA cache every N optimizer steps
+  max_oom_retries: 5                      # Max OOM errors before stopping
 
   # Checkpointing
   checkpoint_dir: "checkpoints"
-  save_every: 5
+  save_every: 1                            # Save EVERY epoch
 
   # Logging
   log_every: 100
@@ -196,23 +205,23 @@ data:
   pin_memory: true
   prefetch_factor: 2
 
-# Generation Configuration - IMPROVED
+# Generation Configuration - FAST FOR TRAINING
 generation:
-  max_length: 256
-  min_length: 30                          # IMPROVED: Longer min
-  num_beams: 6                            # IMPROVED: More beams
+  max_length: 200                         # Shorter during training
+  min_length: 20
+  num_beams: 2                            # FAST: Only 2 beams during training validation
   temperature: 1.0
   top_k: 50
-  top_p: 0.92                             # IMPROVED: Slightly lower
-  repetition_penalty: 1.5                 # IMPROVED: Higher penalty
-  length_penalty: 1.2                     # IMPROVED: Encourage longer
-  no_repeat_ngram_size: 4                 # IMPROVED: Larger n-gram
+  top_p: 0.92
+  repetition_penalty: 1.3
+  length_penalty: 1.0
+  no_repeat_ngram_size: 3
   early_stopping: true
   do_sample: false
 
-  # IMPROVED: Diverse beam search
-  num_beam_groups: 2
-  diversity_penalty: 0.5
+  # DISABLED for speed during training
+  num_beam_groups: 1
+  diversity_penalty: 0.0
 
 # API Configuration
 api:

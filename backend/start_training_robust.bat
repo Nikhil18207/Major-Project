@@ -37,8 +37,8 @@ echo.
 echo ========================================
 echo  Starting Training...
 echo  - Total Epochs: 50
-echo  - Checkpoints: Every 5 epochs
-echo  - Expected Time: 12-17 hours
+echo  - Steps/Epoch: ~240
+echo  - Expected Time: ~65 hours (2.7 days)
 echo ========================================
 echo.
 
