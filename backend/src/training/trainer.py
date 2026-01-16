@@ -211,9 +211,12 @@ class XR2TextTrainer:
         # Mixed precision scaler (Fix: specify device for PyTorch 2.4+)
         self.scaler = GradScaler('cuda') if self.use_amp else None
 
-        # OOM Recovery settings
+        # OOM Recovery settings - read from config
         self.oom_recovery_enabled = True
         self.oom_batch_reduction = 0.5  # Reduce batch by 50% on OOM
+        self.max_oom_retries = config.get("max_oom_retries", 5)  # Max OOM errors before stopping
+        self.clear_cache_every_steps = config.get("clear_cache_every_steps", 10)  # Clear cache every N steps
+        logger.info(f"OOM recovery enabled: max {self.max_oom_retries} retries, cache clear every {self.clear_cache_every_steps} steps")
 
         # Metrics tracking
         self.metrics_tracker = MetricsTracker()
@@ -607,10 +610,10 @@ class XR2TextTrainer:
                         gc.collect()
 
                     # Skip this batch if OOM count is reasonable, otherwise stop
-                    if oom_count <= 5:
+                    if oom_count <= self.max_oom_retries:
                         continue
                     else:
-                        logger.error(f"Too many OOMs ({oom_count}), stopping to prevent corruption")
+                        logger.error(f"Too many OOMs ({oom_count}/{self.max_oom_retries}), stopping to prevent corruption")
                         raise e
 
                 # CUBLAS Error Recovery - retry on CUDA crashes
@@ -671,8 +674,8 @@ class XR2TextTrainer:
                 if hasattr(self, '_cublas_retry_count'):
                     self._cublas_retry_count = 0
 
-                # Periodic cache clearing to prevent memory fragmentation (every 10 optimizer steps)
-                if self.global_step % 10 == 0:
+                # Periodic cache clearing to prevent memory fragmentation
+                if self.global_step % self.clear_cache_every_steps == 0:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     gc.collect()
