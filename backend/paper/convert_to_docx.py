@@ -93,7 +93,7 @@ def create_paper():
     # Authors
     authors = doc.add_paragraph()
     authors.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    authors_run = authors.add_run('S. Nikhil¹, Dadhania Omkumar¹, Dr. Damodar Panigrahy²')
+    authors_run = authors.add_run('S. Nikhil¹, Dadhania Omkumar¹, Rahul Saha¹, Dr. Damodar Panigrahy²')
     authors_run.font.size = Pt(12)
     authors_run.bold = True
 
@@ -101,7 +101,7 @@ def create_paper():
     affiliation.alignment = WD_ALIGN_PARAGRAPH.CENTER
     affiliation.add_run('¹² Department of Computer Science and Engineering\n').font.size = Pt(10)
     affiliation.add_run('Institution Name, City, Country\n').font.size = Pt(10)
-    affiliation.add_run('{nikhil.s, omkumar.d}@institution.edu').font.size = Pt(10)
+    affiliation.add_run('{nikhil.s, omkumar.d, rahul.s}@institution.edu').font.size = Pt(10)
 
     doc.add_paragraph()
 

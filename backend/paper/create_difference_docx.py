@@ -316,7 +316,7 @@ def create_difference_doc():
     footer = doc.add_paragraph()
     footer.add_run('Document History\n').bold = True
     footer.add_run('Created: 2026-01-19\n')
-    footer.add_run('Authors: S. Nikhil, Dadhania Omkumar\n')
+    footer.add_run('Authors: S. Nikhil, Dadhania Omkumar, Rahul Saha\n')
     footer.add_run('Supervisor: Dr. Damodar Panigrahy\n')
     footer.add_run('Project: XR2Text - Chest X-Ray Report Generation with HAQT-ARR')
 
