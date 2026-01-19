@@ -65,54 +65,66 @@ model:
 
 # Training Configuration - OPTIMIZED FOR RTX 4060 8GB
 training:
-  epochs: 50                              # REDUCED: 50 epochs is enough for good results
-  batch_size: 1                           # IMPROVED: Reduced for RTX 4060 with larger model
-  learning_rate: 1.0e-4                   # IMPROVED: Higher LR for faster convergence
-  weight_decay: 0.05                      # IMPROVED: More regularization
-  warmup_steps: 500                       # REDUCED: Fewer total steps now
-  gradient_accumulation_steps: 128        # ~240 steps/epoch, ~65 hours total (2.7 days)
+  epochs: 50                              # 50 epochs for full training
+  batch_size: 1                           # RTX 4060 can only handle batch_size=1
+
+  # ==========================================================================
+  # LEARNING RATES - LAYER-WISE FOR FASTER CONVERGENCE
+  # ==========================================================================
+  learning_rate: 2.0e-4                   # Base LR (doubled for faster learning)
+  encoder_lr: 5.0e-5                      # Lower LR for pretrained Swin encoder
+  decoder_lr: 2.0e-4                      # Standard LR for BioBART decoder
+  projection_lr: 3.0e-4                   # Higher LR for new HAQT-ARR layers
+
+  weight_decay: 0.01                      # Reduced from 0.05 for less regularization
+  warmup_steps: 500                       # Warmup steps for stability
+  gradient_accumulation_steps: 64         # Effective batch = 64 (more gradient updates)
   max_grad_norm: 1.0
   use_amp: true                           # Essential for RTX 4060
 
   # Scheduler
-  scheduler: "cosine_with_restarts"       # IMPROVED: Restarts help escape local minima
-  num_cycles: 3                           # Number of cosine cycles
+  scheduler: "cosine_with_restarts"       # Restarts help escape local minima
+  num_cycles: 2                           # 2 cycles (restart at epoch 25)
+  min_lr_ratio: 0.01                      # Don't decay LR too much
 
   # Early stopping
-  patience: 20                            # IMPROVED: More patience
+  patience: 20                            # More patience for convergence
 
-  # Validation - OPTIMIZED FOR SPEED
-  val_fraction: 0.10                      # Reduced: 10% of val set for faster validation
-  validate_every: 2                       # Validate every 2 epochs
+  # Validation
+  val_fraction: 0.10                      # 10% of val set for faster validation
+  validate_every: 2                       # Validate every 2 epochs (RTX 4060 is slow)
 
-  # IMPROVED: Reduced label smoothing
-  label_smoothing: 0.05                   # Reduced from 0.1
+  # Label smoothing
+  label_smoothing: 0.1                    # For better generalization
 
   # Scheduled sampling for improved generation
   use_scheduled_sampling: true
   scheduled_sampling_start: 1.0
-  scheduled_sampling_end: 0.4             # IMPROVED: Lower end ratio
-  scheduled_sampling_warmup: 10           # IMPROVED: Longer warmup
+  scheduled_sampling_end: 0.6             # More teacher forcing for stability
+  scheduled_sampling_warmup: 5            # Reduced warmup
 
-  # R-Drop regularization (DISABLED for faster training)
-  # Can be enabled later for final model to squeeze extra 1-2% metrics
+  # R-Drop regularization (DISABLED for RTX 4060 - too slow)
   use_rdrop: false
-  rdrop_alpha: 0.7                        # R-Drop loss weight (only used if use_rdrop: true)
+  rdrop_alpha: 0.5
 
   # Region weight regularization
   use_region_regularization: true
-  region_regularization_weight: 0.01
+  region_regularization_weight: 0.005     # Reduced
 
-  # NOVEL: Novel loss functions
+  # ==========================================================================
+  # NOVEL LOSS FUNCTIONS - REBALANCED FOR FASTER CONVERGENCE
+  # ==========================================================================
   use_novel_losses: true
   use_anatomical_consistency_loss: true
   use_clinical_entity_loss: true
   use_region_focal_loss: true
-  use_cross_modal_loss: true              # IMPROVED: Now enabled
-  anatomical_loss_weight: 0.1
-  clinical_loss_weight: 0.2
-  focal_loss_weight: 0.15
-  alignment_loss_weight: 0.1
+  use_cross_modal_loss: false             # Disabled initially - enable after epoch 10
+
+  # Reduced weights to focus on main task
+  anatomical_loss_weight: 0.05
+  clinical_loss_weight: 0.1
+  focal_loss_weight: 0.05
+  alignment_loss_weight: 0.0
 
   # NOVEL: Curriculum learning - COMPRESSED for 50 epochs
   use_curriculum_learning: true
@@ -183,13 +195,14 @@ training:
   cublas_max_retries: 3                   # Number of retries before failing
   cublas_retry_delay: 10                  # Seconds to wait between retries
 
-  # Memory Management (NEW - prevents OOM from memory fragmentation)
-  clear_cache_every_steps: 10             # Clear CUDA cache every N optimizer steps
-  max_oom_retries: 5                      # Max OOM errors before stopping
+  # Memory Management (IMPROVED - prevents OOM from memory fragmentation)
+  clear_cache_every_steps: 5              # Clear CUDA cache every N optimizer steps (more frequent)
+  max_oom_retries: 10                     # Max OOM errors before stopping (increased for long epochs)
 
   # Checkpointing
   checkpoint_dir: "checkpoints"
-  save_every: 1                            # Save EVERY epoch
+  # NOTE: Periodic checkpoints DISABLED - only best_model.pt saved at end of training
+  # The trainer tracks the best model (by BLEU-4 + ROUGE-L) in memory and saves it at the end
 
   # Logging
   log_every: 100

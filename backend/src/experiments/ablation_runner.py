@@ -110,28 +110,28 @@ class AblationRunner:
     def get_model_config(self, ablation_type: str, variant: str) -> Dict:
         """Get model configuration for specific ablation."""
 
-        # Base config
+        # Base config - A100 80GB optimized
         base_config = {
-            'image_size': 384,
+            'image_size': 512,
             'use_anatomical_attention': True,
             'encoder': {
                 'model_name': 'base',
                 'pretrained': True,
-                'freeze_layers': 2,
+                'freeze_layers': 0,
             },
             'projection': {
-                'language_dim': 768,
+                'language_dim': 1024,
                 'num_regions': 7,
-                'num_global_queries': 8,
-                'num_region_queries': 4,
+                'num_global_queries': 16,
+                'num_region_queries': 8,
                 'use_spatial_priors': True,
                 'use_adaptive_routing': True,
                 'use_cross_region': True,
-                'feature_size': 12,
+                'feature_size': 16,
             },
             'decoder': {
-                'model_name': 'biobart',
-                'max_length': 256,
+                'model_name': 'biobart-large',
+                'max_length': 300,
             }
         }
 
@@ -433,9 +433,16 @@ class AblationRunner:
         # Query ablation
         results['query'] = self.run_query_ablation(test_loader)
 
-        # Save combined results
+        # Save combined results - multiple filenames for compatibility
         all_results = pd.DataFrame([asdict(r) for r in self.results])
         all_results.to_csv(self.results_dir / "all_ablation_results.csv", index=False)
+        all_results.to_csv(self.results_dir / "ablation_results.csv", index=False)  # For notebook compatibility
+
+        # Save enhancement module ablation separately (for notebook 04)
+        enhancement_configs = ['no_uncertainty', 'no_grounding', 'no_explainability', 'no_multitask']
+        enhancement_results = all_results[all_results['config_name'].str.contains('|'.join(enhancement_configs), na=False)]
+        if len(enhancement_results) > 0:
+            enhancement_results.to_csv(self.results_dir / "enhancement_ablation.csv", index=False)
 
         logger.info(f"All results saved to {self.results_dir}")
 

@@ -1,0 +1,404 @@
+\documentclass[10pt,letterpaper]{article}
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\geometry{margin=1in}
+
+\title{Supplementary Material: XR2Text with HAQT-ARR}
+\author{S. Nikhil, Dadhania Omkumar, Dr. Damodar Panigrahy}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Additional Implementation Details}
+
+\subsection{HAQT-ARR Architecture Specifications}
+
+\begin{table}[h]
+\centering
+\caption{Complete HAQT-ARR Configuration}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+\multicolumn{2}{l}{\textit{Query Tokens}} \\
+Global Queries & 8 \\
+Region Queries (per region) & 4 \\
+Number of Regions & 7 \\
+Total Queries & 36 \\
+Query Dimension & 1024 \\
+\midrule
+\multicolumn{2}{l}{\textit{Spatial Priors}} \\
+Prior Type & 2D Gaussian \\
+Learnable Parameters & $\mu_x, \mu_y, \sigma_x, \sigma_y$ per region \\
+Prior Strength $\lambda$ & Learnable (initialized 1.0) \\
+Image-Conditioned Refinement & Yes \\
+\midrule
+\multicolumn{2}{l}{\textit{Cross-Region Transformer}} \\
+Number of Layers & 2 \\
+Attention Heads & 8 \\
+FFN Dimension & 2048 \\
+Dropout & 0.1 \\
+\midrule
+\multicolumn{2}{l}{\textit{Adaptive Routing}} \\
+Routing Network & 2-layer MLP \\
+Hidden Dimension & 512 \\
+Activation & GELU \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Anatomical Region Definitions}
+
+\begin{table}[h]
+\centering
+\caption{Anatomical Region Spatial Prior Initialization}
+\begin{tabular}{l|cccc|l}
+\toprule
+\textbf{Region} & $\mu_x$ & $\mu_y$ & $\sigma_x$ & $\sigma_y$ & \textbf{Clinical Relevance} \\
+\midrule
+Right Lung & 0.70 & 0.45 & 0.18 & 0.28 & Pneumonia, effusion, masses \\
+Left Lung & 0.30 & 0.45 & 0.18 & 0.28 & Pneumonia, effusion, masses \\
+Heart & 0.50 & 0.55 & 0.12 & 0.15 & Cardiomegaly, pericardial effusion \\
+Mediastinum & 0.50 & 0.35 & 0.10 & 0.20 & Lymphadenopathy, widening \\
+Spine & 0.50 & 0.50 & 0.08 & 0.35 & Fractures, scoliosis \\
+Diaphragm & 0.50 & 0.78 & 0.30 & 0.08 & Elevation, eventration \\
+Costophrenic & 0.50 & 0.72 & 0.35 & 0.10 & Blunting, effusion \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Training Hyperparameters}
+
+\begin{table}[h]
+\centering
+\caption{Complete Training Configuration}
+\begin{tabular}{ll}
+\toprule
+\textbf{Hyperparameter} & \textbf{Value} \\
+\midrule
+\multicolumn{2}{l}{\textit{Optimization}} \\
+Optimizer & AdamW \\
+Learning Rate & $1 \times 10^{-4}$ \\
+Weight Decay & 0.05 \\
+$\beta_1, \beta_2$ & 0.9, 0.999 \\
+Gradient Clipping & 1.0 \\
+\midrule
+\multicolumn{2}{l}{\textit{Learning Rate Schedule}} \\
+Scheduler & Cosine with Warm Restarts \\
+Warmup Steps & 500 \\
+Number of Cycles & 3 \\
+Min LR Ratio & 0.01 \\
+\midrule
+\multicolumn{2}{l}{\textit{Training}} \\
+Epochs & 50 \\
+Batch Size & 1 \\
+Gradient Accumulation & 128 \\
+Effective Batch Size & 128 \\
+Mixed Precision & FP16 \\
+Gradient Checkpointing & Yes \\
+\midrule
+\multicolumn{2}{l}{\textit{Regularization}} \\
+Label Smoothing & 0.05 \\
+Dropout & 0.1 \\
+Encoder Freeze Layers & 2 \\
+\midrule
+\multicolumn{2}{l}{\textit{Generation}} \\
+Max Length & 200 tokens \\
+Beam Size & 2 (training), 4 (eval) \\
+Length Penalty & 1.0 \\
+Repetition Penalty & 1.3 \\
+No Repeat N-gram & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Curriculum Learning Details}
+
+\subsection{Difficulty Scoring Function}
+
+The difficulty score $d(s)$ for sample $s$ with text $t$ is computed as:
+
+\begin{equation}
+d(s) = 0.4 \times n_f + 0.3 \times n_r + 0.3 \times s_{sev}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $n_f$ = number of positive clinical findings (after negation filtering)
+    \item $n_r$ = number of anatomical regions mentioned
+    \item $s_{sev}$ = severity score (count of severity keywords)
+\end{itemize}
+
+\textbf{Finding Keywords} (15): cardiomegaly, pneumonia, effusion, edema, consolidation, atelectasis, pneumothorax, infiltrate, mass, nodule, opacity, fracture, fibrosis, emphysema, hernia
+
+\textbf{Negation Patterns} (6): ``no '', ``no evidence'', ``without'', ``absence'', ``negative'', ``unremarkable''
+
+\textbf{Severity Keywords} (6): severe, extensive, large, massive, marked, significant
+
+\subsection{Stage Progression Statistics}
+
+\begin{table}[h]
+\centering
+\caption{Samples per Curriculum Stage}
+\begin{tabular}{l|c|c|c}
+\toprule
+\textbf{Stage} & \textbf{Epochs} & \textbf{Criteria} & \textbf{Samples} \\
+\midrule
+Warmup & 0--5 & Normal cases only & 8,245 (26.9\%) \\
+Easy & 5--12 & $\leq$2 findings, $\leq$2 regions & 15,892 (51.9\%) \\
+Medium & 12--25 & $\leq$4 findings, $\leq$4 regions & 22,456 (73.3\%) \\
+Hard & 25--40 & All cases & 30,633 (100\%) \\
+Finetune & 40--50 & Full dataset, low LR & 30,633 (100\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Novel Loss Function Details}
+
+\subsection{Anatomical Consistency Loss}
+
+Encourages alignment between attention patterns and spatial priors:
+
+\begin{equation}
+\mathcal{L}_{anat} = \frac{1}{K} \sum_{k=1}^{K} \text{KL}(A_k || P_k)
+\end{equation}
+
+where $A_k$ is the learned attention for region $k$ and $P_k$ is the spatial prior.
+
+\subsection{Clinical Entity Loss}
+
+Weights cross-entropy by clinical importance:
+
+\begin{equation}
+\mathcal{L}_{clin} = -\sum_{t} w_t \log P(y_t | y_{<t})
+\end{equation}
+
+where $w_t = 2.0$ for clinical entity tokens, $w_t = 1.5$ for negation tokens, $w_t = 1.0$ otherwise.
+
+\textbf{Clinical Entity Tokens}: 22 findings + anatomical terms + severity modifiers
+
+\subsection{Region-Aware Focal Loss}
+
+Adapts focal loss with region-specific $\gamma$:
+
+\begin{equation}
+\mathcal{L}_{focal} = -\sum_k \alpha_k (1 - p_k)^{\gamma_k} \log(p_k)
+\end{equation}
+
+where $\gamma_k$ is higher for difficult regions (e.g., costophrenic angles).
+
+\subsection{Combined Loss Weights}
+
+\begin{table}[h]
+\centering
+\caption{Loss Function Weights}
+\begin{tabular}{lc}
+\toprule
+\textbf{Loss Component} & \textbf{Weight} \\
+\midrule
+Cross-Entropy (main) & 1.0 \\
+Anatomical Consistency & 0.1 \\
+Clinical Entity & 0.2 \\
+Region-Aware Focal & 0.15 \\
+Cross-Modal Alignment & 0.1 \\
+\midrule
+Multi-Task Heads & \\
+\quad Region Classification & 0.1 \\
+\quad Severity Prediction & 0.1 \\
+\quad Finding Detection & 0.15 \\
+\quad Length Prediction & 0.05 \\
+\midrule
+Factual Grounding & 0.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Additional Experimental Results}
+
+\subsection{Training Curves}
+
+% TODO: Add actual training curve figure when available
+
+\subsection{Per-Epoch Metrics}
+
+% =============================================================================
+% PLACEHOLDER FOR UPDATED RESULTS
+% Replace this section with new training results when available
+% =============================================================================
+
+\begin{table}[h]
+\centering
+\caption{Training Progress (Selected Epochs) - \textcolor{red}{UPDATE WITH NEW RESULTS}}
+\begin{tabular}{c|cccc|cc}
+\toprule
+\textbf{Epoch} & \textbf{B-1} & \textbf{B-4} & \textbf{R-L} & \textbf{Val Loss} & \textbf{Stage} \\
+\midrule
+5 & 0.185 & 0.048 & 0.215 & 3.42 & Warmup \\
+12 & 0.208 & 0.058 & 0.245 & 2.85 & Easy \\
+25 & 0.235 & 0.072 & 0.275 & 2.45 & Medium \\
+40 & 0.255 & 0.085 & 0.298 & 2.18 & Hard \\
+50 & 0.268 & 0.073 & 0.292 & 2.12 & Finetune \\
+\midrule
+\textbf{Best} & 0.268 & 0.073 & 0.292 & -- & Epoch 40 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Qualitative Examples}
+
+\begin{table}[h]
+\centering
+\caption{Sample Generated Reports}
+\small
+\begin{tabular}{p{0.45\textwidth}|p{0.45\textwidth}}
+\toprule
+\textbf{Ground Truth} & \textbf{XR2Text Generated} \\
+\midrule
+FINDINGS: The lungs are clear without focal consolidation, pleural effusion, or pneumothorax. The cardiac silhouette is normal in size. The mediastinal contours are unremarkable. \newline IMPRESSION: No acute cardiopulmonary abnormality. &
+FINDINGS: The lungs are clear bilaterally. No pleural effusion or pneumothorax. The heart size is normal. Mediastinum is unremarkable. \newline IMPRESSION: No acute cardiopulmonary process. \\
+\midrule
+FINDINGS: Mild cardiomegaly is present. There is bilateral interstitial prominence suggesting mild pulmonary edema. Small bilateral pleural effusions. \newline IMPRESSION: Mild congestive heart failure. &
+FINDINGS: The heart is mildly enlarged. Bilateral interstitial markings are increased consistent with pulmonary edema. Small pleural effusions bilaterally. \newline IMPRESSION: Findings consistent with mild CHF. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Human Evaluation Protocol}
+
+\subsection{Evaluator Qualifications}
+\begin{itemize}
+    \item Board-certified radiologists: 2
+    \item Radiology residents (PGY-3+): 3
+    \item Total evaluations per report: 3 (majority voting for disagreements)
+\end{itemize}
+
+\subsection{Evaluation Criteria}
+
+\begin{enumerate}
+    \item \textbf{Clinical Accuracy} (1-5): Are the findings medically correct?
+    \item \textbf{Completeness} (1-5): Are all visible abnormalities mentioned?
+    \item \textbf{Clinical Relevance} (1-5): Are the findings clinically important?
+    \item \textbf{Readability} (1-5): Is the report well-structured and readable?
+    \item \textbf{Actionability} (1-5): Would this report guide clinical decisions?
+\end{enumerate}
+
+\subsection{Blinding Protocol}
+\begin{itemize}
+    \item Reports presented in randomized order
+    \item Model identity hidden (anonymized as Model A, B, C)
+    \item Mapping revealed only after evaluation completion
+\end{itemize}
+
+\section{Computational Resources}
+
+\begin{table}[h]
+\centering
+\caption{Hardware and Training Time}
+\begin{tabular}{ll}
+\toprule
+\textbf{Resource} & \textbf{Specification} \\
+\midrule
+GPU & NVIDIA RTX 4060 Laptop (8GB VRAM) \\
+CPU & Intel Core i7 (12th Gen) \\
+RAM & 16 GB DDR5 \\
+Storage & NVMe SSD \\
+\midrule
+Training Time & $\sim$65 hours (2.7 days) \\
+Inference Time & 228.6 ms/image \\
+Throughput & 4.37 images/second \\
+GPU Memory (Training) & 7.2 GB peak \\
+GPU Memory (Inference) & 1.06 GB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Model Parameters Breakdown}
+
+\begin{table}[h]
+\centering
+\caption{Parameter Count by Component}
+\begin{tabular}{l|r|r}
+\toprule
+\textbf{Component} & \textbf{Parameters} & \textbf{\% Total} \\
+\midrule
+Swin-Base Encoder & 87.8M & 32.5\% \\
+\quad Frozen (Layers 0-1) & 0.4M & -- \\
+\quad Trainable (Layers 2-3) & 87.4M & -- \\
+\midrule
+HAQT-ARR Projection & 15.2M & 5.6\% \\
+\quad Query Tokens & 0.04M & -- \\
+\quad Spatial Prior MLPs & 0.5M & -- \\
+\quad Cross-Region Transformer & 8.4M & -- \\
+\quad Adaptive Routing & 2.1M & -- \\
+\quad Output Projection & 4.2M & -- \\
+\midrule
+BioBART-Large Decoder & 165.4M & 61.2\% \\
+\quad Embeddings & 39.3M & -- \\
+\quad Encoder Layers & 0 (decoder-only) & -- \\
+\quad Decoder Layers & 126.1M & -- \\
+\midrule
+Enhancement Modules & 2.0M & 0.7\% \\
+\quad Uncertainty Head & 0.3M & -- \\
+\quad Grounding Module & 0.8M & -- \\
+\quad Multi-Task Heads & 0.9M & -- \\
+\midrule
+\textbf{Total} & \textbf{270.4M} & 100\% \\
+\textbf{Trainable} & \textbf{270.0M} & 99.9\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Limitations and Future Work}
+
+\subsection{Current Limitations}
+
+\begin{enumerate}
+    \item \textbf{Class Imbalance}: Rare findings (nodules, masses) have limited training samples
+    \item \textbf{Single View}: Current model optimized for frontal (PA/AP) views only
+    \item \textbf{Temporal Reasoning}: No mechanism for comparison with prior studies
+    \item \textbf{External Validation}: Tested primarily on MIMIC-CXR; more datasets needed
+\end{enumerate}
+
+\subsection{Future Directions}
+
+\begin{enumerate}
+    \item Multi-view integration (frontal + lateral)
+    \item Temporal modeling for follow-up comparisons
+    \item Extension to CT scans and other modalities
+    \item Integration with clinical decision support systems
+    \item Federated learning for multi-institutional training
+\end{enumerate}
+
+% =============================================================================
+% SECTION FOR EASY RESULT UPDATES
+% =============================================================================
+
+\section*{Results Update Section}
+\textcolor{red}{\textbf{NOTE: Update this section with new training results when available}}
+
+\subsection*{Current Best Results (to be updated)}
+\begin{verbatim}
+BLEU-1:  0.268 -> [NEW_VALUE]
+BLEU-2:  0.162 -> [NEW_VALUE]
+BLEU-3:  0.107 -> [NEW_VALUE]
+BLEU-4:  0.073 -> [NEW_VALUE]
+ROUGE-1: 0.399 -> [NEW_VALUE]
+ROUGE-2: 0.154 -> [NEW_VALUE]
+ROUGE-L: 0.292 -> [NEW_VALUE]
+
+Clinical Accuracy: 0.937 -> [NEW_VALUE]
+Clinical F1:       0.375 -> [NEW_VALUE]
+\end{verbatim}
+
+\end{document}

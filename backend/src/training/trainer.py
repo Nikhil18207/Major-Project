@@ -20,14 +20,16 @@ Supervisor: Dr. Damodar Panigrahy
 
 import os
 import gc
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LRScheduler
 # Fix: Use non-deprecated amp imports (PyTorch 2.4+)
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from typing import Optional, Dict, List, Callable
+from typing import Optional, Dict, List, Callable, Tuple, Any
 from pathlib import Path
 from tqdm import tqdm
 from loguru import logger
@@ -48,6 +50,71 @@ from .losses import CombinedNovelLoss
 from .curriculum import AnatomicalCurriculumScheduler, CurriculumDataset, create_curriculum_dataloader
 from ..utils.clinical_validator import ClinicalValidator
 from ..data.dataset import IGNORE_INDEX
+from copy import deepcopy
+
+
+class EMA:
+    """
+    Exponential Moving Average for model parameters.
+
+    IMPROVED: Provides more stable model weights for evaluation and final checkpoint.
+    EMA helps smooth out noisy gradients and often leads to better generalization.
+
+    Usage:
+        ema = EMA(model, decay=0.999)
+        # During training:
+        ema.update()
+        # For evaluation:
+        ema.apply_shadow()  # Use EMA weights
+        # Evaluate...
+        ema.restore()  # Restore original weights
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+
+        # Initialize shadow parameters
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    @torch.no_grad()
+    def update(self):
+        """Update EMA parameters."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.shadow[name] = (
+                    self.decay * self.shadow[name] + (1 - self.decay) * param.data
+                )
+
+    def apply_shadow(self):
+        """Apply EMA weights to model (for evaluation)."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.backup[name] = param.data.clone()
+                param.data = self.shadow[name]
+
+    def restore(self):
+        """Restore original weights after evaluation."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.backup:
+                param.data = self.backup[name]
+        self.backup = {}
+
+    def state_dict(self):
+        """Get EMA state for checkpointing."""
+        return {
+            'shadow': self.shadow,
+            'decay': self.decay,
+        }
+
+    def load_state_dict(self, state_dict):
+        """Load EMA state from checkpoint."""
+        self.shadow = state_dict['shadow']
+        self.decay = state_dict.get('decay', self.decay)
 
 
 class XR2TextTrainer:
@@ -114,7 +181,9 @@ class XR2TextTrainer:
         # Early stopping
         self.patience = config.get("patience", 15)  # Increased from 5
         self.best_metric = 0.0
+        self.best_epoch = 0
         self.patience_counter = 0
+        self.best_model_state = None  # Store best model in memory, save only at end
 
         # Label smoothing for regularization
         self.label_smoothing = config.get("label_smoothing", 0.1)
@@ -187,10 +256,10 @@ class XR2TextTrainer:
         if self.cublas_retry_enabled:
             logger.info(f"CUBLAS error recovery enabled: {self.cublas_max_retries} retries with {self.cublas_retry_delay}s delay")
 
-        # Checkpointing
+        # Checkpointing - ONLY best model saved at the end of training
         self.checkpoint_dir = Path(config.get("checkpoint_dir", "checkpoints"))
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.save_every = config.get("save_every", 5)
+        # NOTE: Periodic checkpoints removed - best model tracked in memory and saved at end
 
         # Logging - reduced frequency to avoid cluttering output
         self.log_every = config.get("log_every", 500)
@@ -206,16 +275,18 @@ class XR2TextTrainer:
             scheduler_type=config.get("scheduler", "cosine"),
             num_training_steps=total_steps,
             num_warmup_steps=self.warmup_steps,
+            min_lr_ratio=config.get("min_lr_ratio", 0.1),
+            num_cycles=config.get("num_cycles", 2),
         )
 
         # Mixed precision scaler (Fix: specify device for PyTorch 2.4+)
         self.scaler = GradScaler('cuda') if self.use_amp else None
 
-        # OOM Recovery settings - read from config
+        # OOM Recovery settings - read from config (defaults match default.yaml)
         self.oom_recovery_enabled = True
         self.oom_batch_reduction = 0.5  # Reduce batch by 50% on OOM
-        self.max_oom_retries = config.get("max_oom_retries", 5)  # Max OOM errors before stopping
-        self.clear_cache_every_steps = config.get("clear_cache_every_steps", 10)  # Clear cache every N steps
+        self.max_oom_retries = config.get("max_oom_retries", 10)  # Max OOM errors before stopping
+        self.clear_cache_every_steps = config.get("clear_cache_every_steps", 5)  # Clear cache every N steps
         logger.info(f"OOM recovery enabled: max {self.max_oom_retries} retries, cache clear every {self.clear_cache_every_steps} steps")
 
         # Metrics tracking
@@ -224,6 +295,14 @@ class XR2TextTrainer:
         # State
         self.current_epoch = 0
         self.global_step = 0
+
+        # IMPROVED: EMA (Exponential Moving Average) for stable training
+        self.use_ema = config.get("use_ema", True)
+        self.ema_decay = config.get("ema_decay", 0.9999)
+        self.ema = None
+        if self.use_ema:
+            self.ema = EMA(self.model, decay=self.ema_decay)
+            logger.info(f"EMA enabled with decay={self.ema_decay}")
 
         # HAQT-ARR tracking
         self.use_anatomical_attention = getattr(model, 'use_anatomical_attention', False)
@@ -241,26 +320,150 @@ class XR2TextTrainer:
         logger.info(f"Early stopping patience: {self.patience}")
 
     def _create_optimizer(self) -> AdamW:
-        """Create optimizer with separate parameter groups."""
+        """Create optimizer with layer-wise learning rates for better convergence."""
         # Separate parameters for weight decay
         no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight"]
 
-        optimizer_grouped_parameters = [
-            {
-                "params": [
-                    p for n, p in self.model.named_parameters()
-                    if p.requires_grad and not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": self.weight_decay,
-            },
-            {
-                "params": [
-                    p for n, p in self.model.named_parameters()
-                    if p.requires_grad and any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
+        # Layer-wise learning rates (IMPROVED for faster convergence)
+        encoder_lr = self.config.get("encoder_lr", self.learning_rate * 0.5)
+        decoder_lr = self.config.get("decoder_lr", self.learning_rate)
+        projection_lr = self.config.get("projection_lr", self.learning_rate * 1.5)
+
+        optimizer_grouped_parameters = []
+        assigned_params = set()  # Track assigned parameters to avoid duplicates
+
+        # Helper to check if parameter is already assigned
+        def is_assigned(p):
+            return id(p) in assigned_params
+
+        def mark_assigned(params):
+            for p in params:
+                assigned_params.add(id(p))
+
+        # 1. Projection/HAQT-ARR parameters FIRST (highest priority - new layers)
+        # These get highest learning rate
+        projection_params_decay = [
+            p for n, p in self.model.named_parameters()
+            if p.requires_grad and not is_assigned(p)
+            and ("projection" in n or "haqt" in n.lower() or "anatomical" in n.lower())
+            and not any(nd in n for nd in no_decay)
         ]
+        projection_params_no_decay = [
+            p for n, p in self.model.named_parameters()
+            if p.requires_grad and not is_assigned(p)
+            and ("projection" in n or "haqt" in n.lower() or "anatomical" in n.lower())
+            and any(nd in n for nd in no_decay)
+        ]
+
+        if projection_params_decay:
+            mark_assigned(projection_params_decay)
+            optimizer_grouped_parameters.append({
+                "params": projection_params_decay,
+                "lr": projection_lr,
+                "weight_decay": self.weight_decay,
+                "name": "projection_decay"
+            })
+        if projection_params_no_decay:
+            mark_assigned(projection_params_no_decay)
+            optimizer_grouped_parameters.append({
+                "params": projection_params_no_decay,
+                "lr": projection_lr,
+                "weight_decay": 0.0,
+                "name": "projection_no_decay"
+            })
+
+        # 2. Encoder parameters (lower learning rate - pretrained)
+        encoder_params_decay = [
+            p for n, p in self.model.named_parameters()
+            if p.requires_grad and not is_assigned(p)
+            and "encoder" in n and not any(nd in n for nd in no_decay)
+        ]
+        encoder_params_no_decay = [
+            p for n, p in self.model.named_parameters()
+            if p.requires_grad and not is_assigned(p)
+            and "encoder" in n and any(nd in n for nd in no_decay)
+        ]
+
+        if encoder_params_decay:
+            mark_assigned(encoder_params_decay)
+            optimizer_grouped_parameters.append({
+                "params": encoder_params_decay,
+                "lr": encoder_lr,
+                "weight_decay": self.weight_decay,
+                "name": "encoder_decay"
+            })
+        if encoder_params_no_decay:
+            mark_assigned(encoder_params_no_decay)
+            optimizer_grouped_parameters.append({
+                "params": encoder_params_no_decay,
+                "lr": encoder_lr,
+                "weight_decay": 0.0,
+                "name": "encoder_no_decay"
+            })
+
+        # 3. Decoder parameters (standard learning rate)
+        decoder_params_decay = [
+            p for n, p in self.model.named_parameters()
+            if p.requires_grad and not is_assigned(p)
+            and "decoder" in n and not any(nd in n for nd in no_decay)
+        ]
+        decoder_params_no_decay = [
+            p for n, p in self.model.named_parameters()
+            if p.requires_grad and not is_assigned(p)
+            and "decoder" in n and any(nd in n for nd in no_decay)
+        ]
+
+        if decoder_params_decay:
+            mark_assigned(decoder_params_decay)
+            optimizer_grouped_parameters.append({
+                "params": decoder_params_decay,
+                "lr": decoder_lr,
+                "weight_decay": self.weight_decay,
+                "name": "decoder_decay"
+            })
+        if decoder_params_no_decay:
+            mark_assigned(decoder_params_no_decay)
+            optimizer_grouped_parameters.append({
+                "params": decoder_params_no_decay,
+                "lr": decoder_lr,
+                "weight_decay": 0.0,
+                "name": "decoder_no_decay"
+            })
+
+        # 4. Any remaining parameters (fallback)
+        other_params_decay = [
+            p for n, p in self.model.named_parameters()
+            if p.requires_grad and not is_assigned(p) and not any(nd in n for nd in no_decay)
+        ]
+        other_params_no_decay = [
+            p for n, p in self.model.named_parameters()
+            if p.requires_grad and not is_assigned(p) and any(nd in n for nd in no_decay)
+        ]
+
+        if other_params_decay:
+            mark_assigned(other_params_decay)
+            optimizer_grouped_parameters.append({
+                "params": other_params_decay,
+                "lr": self.learning_rate,
+                "weight_decay": self.weight_decay,
+                "name": "other_decay"
+            })
+        if other_params_no_decay:
+            mark_assigned(other_params_no_decay)
+            optimizer_grouped_parameters.append({
+                "params": other_params_no_decay,
+                "lr": self.learning_rate,
+                "weight_decay": 0.0,
+                "name": "other_no_decay"
+            })
+
+        # Log parameter groups
+        total_params = 0
+        for group in optimizer_grouped_parameters:
+            n_params = sum(p.numel() for p in group["params"])
+            total_params += n_params
+            logger.info(f"Optimizer group '{group.get('name', 'unnamed')}': {n_params:,} params, lr={group['lr']:.2e}")
+        logger.info(f"Total trainable parameters: {total_params:,}")
 
         return AdamW(
             optimizer_grouped_parameters,
@@ -282,6 +485,38 @@ class XR2TextTrainer:
             progress = (epoch - self.ss_warmup_epochs) / max(decay_epochs, 1)
             self.current_ss_ratio = self.ss_start - (self.ss_start - self.ss_end) * progress
             self.current_ss_ratio = max(self.ss_end, self.current_ss_ratio)
+
+    def _update_focal_gamma(self, epoch: int) -> None:
+        """
+        IMPROVED: Update focal loss gamma with warmup.
+
+        Gradually increases focal gamma from 0 to target value during warmup.
+        This prevents early training instability when the model hasn't learned
+        basic patterns yet.
+
+        Args:
+            epoch: Current training epoch
+        """
+        # Get focal loss config from decoder section
+        decoder_config = self.config.get("decoder", {})
+        target_gamma = decoder_config.get("focal_gamma", 2.0)
+        warmup_epochs = decoder_config.get("focal_gamma_warmup_epochs", 5)
+
+        if warmup_epochs <= 0:
+            # No warmup, use full gamma immediately
+            current_gamma = target_gamma
+        elif epoch < warmup_epochs:
+            # Linear warmup from 0 to target_gamma
+            current_gamma = target_gamma * (epoch / warmup_epochs)
+        else:
+            # After warmup, use full gamma
+            current_gamma = target_gamma
+
+        # Apply to decoder
+        if hasattr(self.model, 'decoder') and hasattr(self.model.decoder, 'set_focal_gamma'):
+            self.model.decoder.set_focal_gamma(current_gamma)
+            if epoch == 0 or (epoch == warmup_epochs and warmup_epochs > 0):
+                logger.info(f"Focal gamma: {current_gamma:.2f} (target: {target_gamma})")
 
     def _compute_region_regularization_loss(self, region_weights: torch.Tensor) -> torch.Tensor:
         """
@@ -387,19 +622,61 @@ class XR2TextTrainer:
             self.current_epoch = start_epoch
             logger.info(f"Resuming from epoch {start_epoch}")
 
+        # Track previous curriculum stage for transition detection
+        prev_stage_name = None
+
         for epoch in range(self.current_epoch, self.epochs):
             self.current_epoch = epoch
 
             # NOVEL: Update curriculum learning - filter samples based on epoch
             if self.use_curriculum:
                 stage_name = self.curriculum_scheduler.get_stage_name(epoch)
-                curriculum_dataset = CurriculumDataset(
+
+                # CRITICAL: Aggressive memory cleanup on curriculum stage transitions
+                # This prevents OOM when transitioning from easy (9k samples) to medium (27k samples)
+                if prev_stage_name is not None and stage_name != prev_stage_name:
+                    logger.info(f"Curriculum stage transition: {prev_stage_name} -> {stage_name}")
+                    logger.info("Performing aggressive memory cleanup before stage transition...")
+
+                    # FIX: Delete old curriculum dataset wrapper explicitly to prevent memory leak
+                    # The CurriculumDataset holds references that can prevent garbage collection
+                    if hasattr(self, '_current_curriculum_dataset'):
+                        del self._current_curriculum_dataset
+                        self._current_curriculum_dataset = None
+
+                    # Delete old dataloader to free memory
+                    if hasattr(self, 'train_loader'):
+                        del self.train_loader
+
+                    # Aggressive cleanup sequence
+                    self.optimizer.zero_grad(set_to_none=True)
+                    gc.collect()
+
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        # Force a full garbage collection cycle
+                        gc.collect()
+                        torch.cuda.empty_cache()
+
+                        # Log memory state after cleanup
+                        allocated = torch.cuda.memory_allocated() / 1024**3
+                        reserved = torch.cuda.memory_reserved() / 1024**3
+                        logger.info(f"GPU memory after cleanup - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
+
+                    # Brief pause to let GPU stabilize
+                    time.sleep(2)
+
+                prev_stage_name = stage_name
+
+                # FIX: Store reference to curriculum dataset for proper cleanup on next transition
+                self._current_curriculum_dataset = CurriculumDataset(
                     base_dataset=self.base_train_dataset,
                     curriculum_scheduler=self.curriculum_scheduler,
                     current_epoch=epoch,
                 )
                 self.train_loader = DataLoader(
-                    curriculum_dataset,
+                    self._current_curriculum_dataset,
                     batch_size=self.train_batch_size,
                     shuffle=True,
                     num_workers=self.train_num_workers,
@@ -407,10 +684,13 @@ class XR2TextTrainer:
                     drop_last=True,
                     collate_fn=self.train_collate_fn,  # Use original collate function
                 )
-                logger.info(f"Curriculum stage: {stage_name} ({len(curriculum_dataset)}/{len(self.base_train_dataset)} samples)")
+                logger.info(f"Curriculum stage: {stage_name} ({len(self._current_curriculum_dataset)}/{len(self.base_train_dataset)} samples)")
 
             # Update scheduled sampling ratio (silent)
             self._update_scheduled_sampling_ratio(epoch)
+
+            # IMPROVED: Update focal loss gamma with warmup
+            self._update_focal_gamma(epoch)
 
             # Training phase
             train_loss = self._train_epoch()
@@ -447,15 +727,25 @@ class XR2TextTrainer:
 
             if current_metric > self.best_metric:
                 self.best_metric = current_metric
+                self.best_epoch = epoch + 1
                 self.patience_counter = 0
-                self._save_checkpoint("best_model.pt", is_best=True)
+
+                # Store best model state in memory (NO DISK SAVE during training)
+                # We'll save only at the very end after all 50 epochs
+                logger.info(f"New best model at epoch {epoch + 1}: BLEU-4 + ROUGE-L = {current_metric:.4f}")
+                self.best_model_state = {
+                    'epoch': epoch + 1,
+                    'model_state_dict': {k: v.cpu().clone() for k, v in self.model.state_dict().items()},
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'best_metric': self.best_metric,
+                    'metrics': val_metrics.copy(),
+                }
                 self.training_logger.log_best_model(epoch + 1, "BLEU-4 + ROUGE-L", current_metric)
             else:
                 self.patience_counter += 1
 
-            # Save periodic checkpoint
-            if (epoch + 1) % self.save_every == 0:
-                self._save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pt")
+            # NOTE: No mid-training checkpoints - only best_model.pt saved at end of training
 
             # Early stopping
             if self.patience_counter >= self.patience:
@@ -466,10 +756,16 @@ class XR2TextTrainer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        # Final checkpoint
-        self._save_checkpoint("final_model.pt")
-
-        logger.info("Training completed!")
+        # Training complete - NOW save the best model to disk
+        logger.info(f"Training completed! Saving best model from epoch {self.best_epoch}...")
+        if hasattr(self, 'best_model_state') and self.best_model_state is not None:
+            checkpoint_path = os.path.join(self.checkpoint_dir, "best_model.pt")
+            torch.save(self.best_model_state, checkpoint_path)
+            logger.info(f"Best model saved to {checkpoint_path}")
+            logger.info(f"Best epoch: {self.best_epoch} | BLEU-4 + ROUGE-L = {self.best_metric:.4f}")
+        else:
+            logger.warning("No best model state found - saving current model")
+            self._save_checkpoint("best_model.pt", is_best=True)
         return self._get_final_metrics()
 
     def _train_epoch(self) -> float:
@@ -582,38 +878,71 @@ class XR2TextTrainer:
             except RuntimeError as e:
                 error_str = str(e).lower()
 
-                # OOM Recovery - more robust handling
+                # OOM Recovery - more robust handling with graceful degradation
                 if "out of memory" in error_str and self.oom_recovery_enabled:
                     oom_count += 1
-                    logger.warning(f"OOM at batch {batch_idx}, clearing cache and skipping (OOM count: {oom_count})")
+                    logger.warning(f"OOM at batch {batch_idx}, attempting recovery (OOM count: {oom_count})")
 
-                    # Aggressive memory cleanup
+                    # Aggressive memory cleanup sequence
                     try:
-                        self.optimizer.zero_grad(set_to_none=True)  # More aggressive than zero_grad()
+                        # Step 1: Clear gradients aggressively
+                        self.optimizer.zero_grad(set_to_none=True)
+
+                        # Step 2: Delete any cached tensors
+                        if 'images' in dir():
+                            del images
+                        if 'input_ids' in dir():
+                            del input_ids
+                        if 'attention_mask' in dir():
+                            del attention_mask
+                        if 'labels' in dir():
+                            del labels
+                        if 'outputs' in dir():
+                            del outputs
+
+                        # Step 3: Force garbage collection
                         gc.collect()
+
+                        # Step 4: CUDA cleanup
                         if torch.cuda.is_available():
-                            torch.cuda.synchronize()  # Wait for all CUDA ops to complete
+                            torch.cuda.synchronize()
                             torch.cuda.empty_cache()
 
-                        # If OOM happens multiple times, wait to let memory settle
-                        if oom_count >= 2:
-                            import time
-                            logger.warning(f"Multiple OOMs ({oom_count}), waiting 10s for memory to settle...")
-                            time.sleep(10)
-                            gc.collect()
+                            # Step 5: Reset CUDA memory stats
+                            torch.cuda.reset_peak_memory_stats()
+
+                            # Log memory after cleanup
+                            allocated = torch.cuda.memory_allocated() / 1024**3
+                            logger.info(f"GPU memory after OOM cleanup: {allocated:.2f} GB")
+
+                        # Step 6: Progressive wait based on OOM count
+                        wait_time = min(5 * oom_count, 60)  # 5s, 10s, 15s... up to 60s
+                        logger.warning(f"Waiting {wait_time}s for GPU to stabilize...")
+                        time.sleep(wait_time)
+
+                        # Additional cleanup after wait
+                        gc.collect()
+                        if torch.cuda.is_available():
                             torch.cuda.empty_cache()
 
                     except Exception as cache_error:
-                        logger.error(f"Cache clearing failed: {cache_error}. Waiting 30s...")
-                        import time
-                        time.sleep(30)  # Long wait to let GPU recover
+                        logger.error(f"Cache clearing failed: {cache_error}")
+                        # Even if cleanup fails, try to continue with a longer wait
+                        time.sleep(60)
                         gc.collect()
 
-                    # Skip this batch if OOM count is reasonable, otherwise stop
+                    # Skip this batch if OOM count is reasonable
                     if oom_count <= self.max_oom_retries:
+                        logger.info(f"Skipping batch {batch_idx} and continuing...")
                         continue
                     else:
-                        logger.error(f"Too many OOMs ({oom_count}/{self.max_oom_retries}), stopping to prevent corruption")
+                        # Save emergency checkpoint before failing
+                        logger.error(f"Too many OOMs ({oom_count}/{self.max_oom_retries})")
+                        try:
+                            self._save_checkpoint(f"emergency_checkpoint_epoch_{self.current_epoch+1}_oom.pt")
+                            logger.info("Emergency checkpoint saved")
+                        except:
+                            pass
                         raise e
 
                 # CUBLAS Error Recovery - retry on CUDA crashes
@@ -636,7 +965,6 @@ class XR2TextTrainer:
                             torch.cuda.synchronize()
                         gc.collect()
 
-                        import time
                         time.sleep(self.cublas_retry_delay)
 
                         # Zero gradients and retry
@@ -670,6 +998,10 @@ class XR2TextTrainer:
                 self.optimizer.zero_grad()
                 self.global_step += 1
 
+                # IMPROVED: Update EMA after each optimization step
+                if self.use_ema and self.ema is not None:
+                    self.ema.update()
+
                 # Reset CUBLAS retry counter on successful step
                 if hasattr(self, '_cublas_retry_count'):
                     self._cublas_retry_count = 0
@@ -690,7 +1022,6 @@ class XR2TextTrainer:
                         elif current_temp >= self.pause_gpu_temp:
                             logger.warning(f"GPU temp {current_temp}°C >= pause threshold. Cooling down for {self.gpu_cooldown_time}s...")
                             torch.cuda.empty_cache()
-                            import time
                             time.sleep(self.gpu_cooldown_time)
                         elif current_temp >= self.warning_gpu_temp:
                             logger.warning(f"GPU temp {current_temp}°C - approaching limit")
@@ -712,6 +1043,10 @@ class XR2TextTrainer:
     @torch.no_grad()
     def _validate(self) -> tuple:
         """Run validation and compute metrics."""
+        # IMPROVED: Use EMA weights for validation (more stable)
+        if self.use_ema and self.ema is not None:
+            self.ema.apply_shadow()
+
         self.model.eval()
         total_loss = 0.0
         all_predictions = []
@@ -767,6 +1102,11 @@ class XR2TextTrainer:
             gen_config = self.config.get('generation', {})
             val_num_beams = gen_config.get('val_num_beams', 2)  # Faster validation
 
+            # NEW: Diverse beam search support (memory-safe)
+            use_diverse = gen_config.get('use_diverse_beam_search', False)
+            num_beam_groups = gen_config.get('num_beam_groups', 1) if use_diverse else 1
+            diversity_penalty = gen_config.get('diversity_penalty', 0.0) if use_diverse else 0.0
+
             _, generated_texts, _ = self.model.generate(
                 images=images,
                 max_length=gen_config.get('max_length', 256),
@@ -776,6 +1116,9 @@ class XR2TextTrainer:
                 repetition_penalty=gen_config.get('repetition_penalty', 1.1),
                 no_repeat_ngram_size=gen_config.get('no_repeat_ngram_size', 3),
                 early_stopping=True,  # Stop when all beams finish
+                # NEW: Diverse beam search (memory-safe, ~5% more VRAM)
+                num_beam_groups=num_beam_groups,
+                diversity_penalty=diversity_penalty,
             )
 
             all_predictions.extend(generated_texts)
@@ -804,24 +1147,57 @@ class XR2TextTrainer:
             metrics["clinical_recall"] = clinical_results["average_recall"]
             metrics["critical_errors"] = clinical_results["total_critical_errors"]
 
+        # IMPROVED: Restore original weights after validation
+        if self.use_ema and self.ema is not None:
+            self.ema.restore()
+
         return val_loss, metrics
 
     def _save_checkpoint(self, filename: str, is_best: bool = False):
-        """Save model checkpoint."""
+        """Save model checkpoint with robust permission handling for RunPod."""
+        # Ensure checkpoint directory exists with proper permissions
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            import os
+            os.chmod(self.checkpoint_dir, 0o777)
+        except:
+            pass  # Ignore permission errors on some systems
+
         checkpoint_path = self.checkpoint_dir / filename
 
+        # FIX: Save epoch_completed flag to handle resume edge case
+        # If training crashes at epoch boundary, we know this epoch was completed
         checkpoint = {
             "epoch": self.current_epoch,
+            "epoch_completed": True,  # FIX: Track if epoch was fully completed
             "global_step": self.global_step,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
+            "ema_state_dict": self.ema.state_dict() if self.use_ema and self.ema else None,  # IMPROVED: Save EMA
             "best_metric": self.best_metric,
+            "patience_counter": self.patience_counter,  # FIX: Also save patience counter
             "config": self.config,
         }
 
-        torch.save(checkpoint, checkpoint_path)
+        # Save with retry logic for RunPod permission issues
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                torch.save(checkpoint, checkpoint_path)
+                break
+            except PermissionError as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Permission error saving checkpoint (attempt {attempt+1}), retrying...")
+                    time.sleep(1)
+                    try:
+                        os.chmod(self.checkpoint_dir, 0o777)
+                    except:
+                        pass
+                else:
+                    logger.error(f"Failed to save checkpoint after {max_retries} attempts: {e}")
+                    raise
 
         self.training_logger.log_checkpoint(
             str(checkpoint_path),
@@ -830,7 +1206,12 @@ class XR2TextTrainer:
         )
 
     def load_checkpoint(self, checkpoint_path: str):
-        """Load model from checkpoint."""
+        """
+        Load model from checkpoint with proper resume handling.
+
+        FIX: Properly handles the edge case where training crashes at epoch boundary.
+        Uses epoch_completed flag to determine correct resume epoch.
+        """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -840,12 +1221,33 @@ class XR2TextTrainer:
         if self.scaler and checkpoint.get("scaler_state_dict"):
             self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
-        self.current_epoch = checkpoint["epoch"] + 1
+        # IMPROVED: Restore EMA state if available
+        if self.use_ema and self.ema and checkpoint.get("ema_state_dict"):
+            self.ema.load_state_dict(checkpoint["ema_state_dict"])
+            logger.info("Restored EMA state from checkpoint")
+
+        # FIX: Properly determine resume epoch based on completion status
+        saved_epoch = checkpoint["epoch"]
+        epoch_completed = checkpoint.get("epoch_completed", True)  # Default True for backwards compatibility
+
+        if epoch_completed:
+            # Epoch was completed, start from next epoch
+            self.current_epoch = saved_epoch + 1
+        else:
+            # Epoch was not completed, resume from same epoch
+            self.current_epoch = saved_epoch
+            logger.warning(f"Resuming incomplete epoch {saved_epoch}")
+
         self.global_step = checkpoint["global_step"]
-        self.best_metric = checkpoint["best_metric"]
+        self.best_metric = checkpoint.get("best_metric", 0.0)
+
+        # FIX: Restore patience counter if available
+        if "patience_counter" in checkpoint:
+            self.patience_counter = checkpoint["patience_counter"]
+            logger.info(f"Restored patience counter: {self.patience_counter}/{self.patience}")
 
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
-        logger.info(f"Resuming from epoch {self.current_epoch}")
+        logger.info(f"Resuming from epoch {self.current_epoch} (saved at epoch {saved_epoch}, completed: {epoch_completed})")
 
     def evaluate(
         self,

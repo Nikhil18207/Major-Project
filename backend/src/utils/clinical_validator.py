@@ -81,9 +81,32 @@ class ClinicalValidator:
 
     Validates generated reports for clinical accuracy and completeness.
     Includes negation detection to distinguish "no cardiomegaly" from "cardiomegaly".
+
+    Configuration:
+        negation_window: Character window size to search for negation patterns (default: 60)
+        uncertainty_window: Character window size for uncertainty patterns (default: 40)
+        severity_window: Character window size for severity keywords (default: 50)
+        location_window: Character window size for location keywords (default: 50)
     """
 
-    def __init__(self):
+    # Configuration constants (previously magic numbers)
+    DEFAULT_NEGATION_WINDOW = 60  # Characters before entity to check for negation
+    DEFAULT_UNCERTAINTY_WINDOW = 40  # Characters around entity for uncertainty
+    DEFAULT_SEVERITY_WINDOW = 50  # Characters around entity for severity
+    DEFAULT_LOCATION_WINDOW = 50  # Characters around entity for location
+
+    def __init__(
+        self,
+        negation_window: int = DEFAULT_NEGATION_WINDOW,
+        uncertainty_window: int = DEFAULT_UNCERTAINTY_WINDOW,
+        severity_window: int = DEFAULT_SEVERITY_WINDOW,
+        location_window: int = DEFAULT_LOCATION_WINDOW,
+    ):
+        # Configurable window sizes
+        self.negation_window = negation_window
+        self.uncertainty_window = uncertainty_window
+        self.severity_window = severity_window
+        self.location_window = location_window
         # Clinical entities and their synonyms
         self.clinical_entities = {
             'cardiomegaly': ['cardiomegaly', 'enlarged heart', 'cardiac enlargement', 'heart enlargement'],
@@ -156,8 +179,8 @@ class ClinicalValidator:
         Returns:
             True if the entity is negated
         """
-        # Check window before entity (60 chars to catch longer negation phrases)
-        window_start = max(0, entity_pos - 60)
+        # Check window before entity (configurable, default 60 chars)
+        window_start = max(0, entity_pos - self.negation_window)
         context_before = text[window_start:entity_pos]
 
         # Check if any negation pattern appears before entity
@@ -185,8 +208,8 @@ class ClinicalValidator:
         Returns:
             True if the entity has uncertainty markers
         """
-        window_start = max(0, entity_pos - 40)
-        window_end = min(len(text), entity_pos + 40)
+        window_start = max(0, entity_pos - self.uncertainty_window)
+        window_end = min(len(text), entity_pos + self.uncertainty_window)
         context = text[window_start:window_end]
 
         return any(unc in context for unc in self.uncertainty_patterns)
@@ -278,10 +301,10 @@ class ClinicalValidator:
         entity_pos = text.find(entity)
         if entity_pos == -1:
             return ClinicalSeverity.MODERATE
-        
-        # Look in a window around the entity
-        window_start = max(0, entity_pos - 50)
-        window_end = min(len(text), entity_pos + len(entity) + 50)
+
+        # Look in a window around the entity (configurable)
+        window_start = max(0, entity_pos - self.severity_window)
+        window_end = min(len(text), entity_pos + len(entity) + self.severity_window)
         context = text[window_start:window_end]
         
         # Check severity keywords
@@ -306,16 +329,17 @@ class ClinicalValidator:
         entity_pos = text.find(entity)
         if entity_pos == -1:
             return 'unspecified'
-        
-        window_start = max(0, entity_pos - 50)
-        window_end = min(len(text), entity_pos + len(entity) + 50)
+
+        # Look in a window around the entity (configurable)
+        window_start = max(0, entity_pos - self.location_window)
+        window_end = min(len(text), entity_pos + len(entity) + self.location_window)
         context = text[window_start:window_end]
-        
+
         locations = []
         for loc, keywords in location_keywords.items():
             if any(kw in context for kw in keywords):
                 locations.append(loc)
-        
+
         return ' '.join(locations) if locations else 'unspecified'
     
     def validate_report(

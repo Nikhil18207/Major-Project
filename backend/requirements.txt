@@ -66,8 +66,8 @@ sacrebleu>=2.4.0
 
 # IMPROVED: Clinical metrics for medical AI evaluation
 bert-score>=0.3.13          # BERTScore for semantic similarity
-# radgraph>=0.1.0           # RadGraph F1 (optional - uncomment if available)
-# Note: radgraph requires specific installation, see: https://github.com/jbdel/radgraph
+radgraph>=0.1.0             # RadGraph F1 for clinical accuracy
+f1chexbert>=0.0.1           # CheXbert F1 for chest X-ray findings
 
 # ============================================
 # Visualization & Notebooks (Research Paper)

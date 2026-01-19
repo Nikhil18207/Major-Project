@@ -103,3 +103,14 @@ temp_cells.txt
 **/nul
 nul
 tmpclaude-*-cwd
+
+# Zip files
+*.zip
+
+# PDF files in paper folder (keep docx only)
+backend/paper/*.pdf
+
+# Keep paper outputs
+!backend/paper/*.docx
+!backend/paper/*.py
+!backend/paper/*.md

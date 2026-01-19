@@ -48,12 +48,13 @@ def get_scheduler(
             min_lr_ratio=min_lr_ratio,
         )
 
-    elif scheduler_type == "cosine_restarts":
+    elif scheduler_type == "cosine_restarts" or scheduler_type == "cosine_with_restarts":
         return get_cosine_with_hard_restarts_schedule_with_warmup(
             optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=num_training_steps,
             num_cycles=num_cycles,
+            min_lr_ratio=min_lr_ratio,
         )
 
     elif scheduler_type == "polynomial":
@@ -123,9 +124,19 @@ def get_cosine_with_hard_restarts_schedule_with_warmup(
     num_warmup_steps: int,
     num_training_steps: int,
     num_cycles: float = 1.0,
+    min_lr_ratio: float = 0.1,
 ) -> LambdaLR:
     """
     Linear warmup followed by cosine decay with hard restarts.
+
+    FIXED: Added min_lr_ratio to prevent LR from dropping to 0.
+
+    Args:
+        optimizer: PyTorch optimizer
+        num_warmup_steps: Number of warmup steps
+        num_training_steps: Total training steps
+        num_cycles: Number of cosine cycles (restarts)
+        min_lr_ratio: Minimum LR ratio (default 0.1 = 10% of base LR)
     """
     def lr_lambda(current_step: int) -> float:
         if current_step < num_warmup_steps:
@@ -134,10 +145,10 @@ def get_cosine_with_hard_restarts_schedule_with_warmup(
         progress = float(current_step - num_warmup_steps) / float(
             max(1, num_training_steps - num_warmup_steps)
         )
-        return max(
-            0.0,
-            0.5 * (1.0 + math.cos(math.pi * ((progress * num_cycles) % 1.0)))
-        )
+        # Cosine decay with min_lr_ratio floor
+        cosine_value = 0.5 * (1.0 + math.cos(math.pi * ((progress * num_cycles) % 1.0)))
+        # Scale to [min_lr_ratio, 1.0] instead of [0, 1.0]
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_value
 
     return LambdaLR(optimizer, lr_lambda)
 
