@@ -744,6 +744,11 @@ class XR2TextTrainer:
                 # Store best model state in memory (NO DISK SAVE during training)
                 # We'll save only at the very end after all 50 epochs
                 logger.info(f"New best model at epoch {epoch + 1}: BLEU-4 + ROUGE-L = {current_metric:.4f}")
+
+                # FIX: Apply EMA weights before saving best model (EMA model is smoother/better)
+                if self.use_ema and self.ema is not None:
+                    self.ema.apply_shadow()
+
                 self.best_model_state = {
                     'epoch': epoch + 1,
                     'model_state_dict': {k: v.cpu().clone() for k, v in self.model.state_dict().items()},
@@ -752,6 +757,10 @@ class XR2TextTrainer:
                     'best_metric': self.best_metric,
                     'metrics': val_metrics.copy(),
                 }
+
+                # Restore original weights for continued training
+                if self.use_ema and self.ema is not None:
+                    self.ema.restore()
                 self.training_logger.log_best_model(epoch + 1, "BLEU-4 + ROUGE-L", current_metric)
             else:
                 self.patience_counter += 1
@@ -1141,8 +1150,10 @@ class XR2TextTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Compute metrics (use actual number of batches processed)
-        val_loss = total_loss / max_val_batches
+        # FIX: Compute metrics using actual number of batches processed (not max_val_batches)
+        # This ensures correct loss averaging when validation ends early
+        actual_batches = min(batch_idx + 1, max_val_batches)
+        val_loss = total_loss / actual_batches
         metrics = compute_metrics(all_predictions, all_references, include_all=False)
         metrics["val_loss"] = val_loss
         
@@ -1161,6 +1172,10 @@ class XR2TextTrainer:
         # IMPROVED: Restore original weights after validation
         if self.use_ema and self.ema is not None:
             self.ema.restore()
+
+        # FIX: Ensure model is back in training mode after validation
+        # (model.train() will be called at start of next epoch, but this is safer)
+        self.model.train()
 
         return val_loss, metrics
 
