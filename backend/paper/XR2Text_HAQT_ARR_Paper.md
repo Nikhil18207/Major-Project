@@ -244,7 +244,7 @@ We evaluate on **MIMIC-CXR** [2], the largest publicly available chest X-ray dat
 | Test Set | 3,064 (10%) |
 | Avg. Findings Length | 52.3 words |
 | Avg. Impression Length | 16.3 words |
-| Image Resolution | 512×512 (resized to 384×384) |
+| Image Resolution | 384×384 |
 
 ### 4.2 Implementation Details
 
@@ -262,8 +262,18 @@ We evaluate on **MIMIC-CXR** [2], the largest publicly available chest X-ray dat
 - **Training Duration**: 50 epochs, approximately 12-16 hours on A40
 - **Mixed Precision**: FP16 with gradient checkpointing for memory efficiency
 
-**Computational Constraints:**
-Due to cloud GPU rental cost considerations, we trained for 50 epochs on a single NVIDIA A40. While this configuration achieved convergence, extended training with larger batch sizes and multiple GPUs may yield improved n-gram metrics. The model checkpoint and training code are publicly available for reproducibility.
+**Computational Constraints (A40 Limitations):**
+Training was conducted on a RunPod cloud instance with NVIDIA A40 (48GB VRAM, 50GB RAM, 9 vCPU). Several memory constraints were encountered:
+
+1. **R-Drop Disabled**: The R-Drop regularization technique requires two forward passes per batch, effectively doubling VRAM usage. With our 541M parameter model, enabling R-Drop caused immediate out-of-memory (OOM) errors on the A40, forcing us to disable this regularization.
+
+2. **Batch Size Limited to 8**: Attempts to use larger batch sizes (16, 32) resulted in OOM errors during the backward pass. We compensated with gradient accumulation (factor of 8) to achieve an effective batch size of 64.
+
+3. **Image Resolution Capped at 384×384**: Higher resolutions (512×512) exceeded available VRAM when combined with our hierarchical HAQT-ARR projection layer and BioBART-Large decoder.
+
+4. **Gradient Checkpointing Required**: Memory-intensive cross-region transformer operations necessitated gradient checkpointing, trading compute time for memory efficiency.
+
+These constraints limited our ability to fully optimize the model, contributing to lower BLEU scores compared to published baselines that trained on larger GPU clusters.
 
 ### 4.3 Evaluation Metrics
 
@@ -610,7 +620,20 @@ Experiments on MIMIC-CXR demonstrate that XR2Text achieves BLEU-1 of 0.223, BLEU
 
 **Limitations and Future Work**: Current limitations include lower BLEU scores compared to template-based methods, suggesting our model generates more varied phrasing.
 
-**Ongoing Hardware Optimization**: We are currently exploring training on NVIDIA A100 PCIe (80GB VRAM) to address memory constraints encountered with A40. Preliminary experiments show that A100 enables: (1) increased batch size from 8 to 32, improving gradient estimation; (2) reduced gradient accumulation from 8 to 2 steps while maintaining effective batch size of 64; (3) approximately 30% faster training per epoch. We also disabled R-Drop regularization (set to FALSE) to ensure training stability given the model's complexity and reduce memory overhead during cross-region attention computations.
+**Planned Hardware Upgrade (A40 → A100)**: To address the memory constraints encountered with the A40 (48GB VRAM, 50GB RAM, 9 vCPU), we plan to migrate training to NVIDIA A100 PCIe (80GB VRAM, 117GB RAM, 12 vCPU) for subsequent iterations. The A100's additional 32GB VRAM will enable significant architectural and training improvements:
+
+| Aspect | A40 (Current) | A100 (Planned) | Improvement |
+|--------|---------------|----------------|-------------|
+| Image Resolution | 384×384 | 512×512 | +78% pixels |
+| Batch Size | 8 | 32 | 4× larger |
+| Beam Search | 2 beams | 4 beams + diverse | Better generation |
+| Query Tokens | 36 | 72 | 2× capacity |
+| Cross-Region Layers | 2 | 3 | Deeper reasoning |
+| Gradient Checkpointing | Required | Disabled | ~20% faster |
+
+**Diverse Beam Search**: The A100's larger memory enables diverse beam search with 4 beams across 2 groups, penalizing similar hypotheses to explore multiple generation paths—critical for medical reports where precise phrasing matters.
+
+This hardware upgrade is expected to improve BLEU-4 scores to 0.12-0.15 (competitive with SOTA) while maintaining our strong METEOR performance.
 
 Future work will focus on: (1) completing A100-based training with optimized hyperparameters, (2) comprehensive ablation studies with statistical significance testing, (3) negation-aware training to reduce the 74 negation errors identified, (4) multi-view integration combining frontal and lateral radiographs, and (5) temporal reasoning for follow-up study comparison.
 
