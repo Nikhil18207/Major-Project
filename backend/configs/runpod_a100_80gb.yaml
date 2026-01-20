@@ -108,10 +108,10 @@ training:
   use_amp: true                           # FP16 - A100 has excellent FP16 perf
 
   # ==========================================================================
-  # SCHEDULER - FIXED: Added min_lr_ratio to prevent LR dropping to 0
+  # SCHEDULER - FIXED: Plain cosine is more stable with curriculum learning
   # ==========================================================================
-  scheduler: "cosine_with_restarts"
-  num_cycles: 2                           # REDUCED from 3 - fewer restarts = more stable
+  scheduler: "cosine"                     # CHANGED from cosine_with_restarts - more stable
+  num_cycles: 1                           # Not used for plain cosine
   min_lr_ratio: 0.1                       # CRITICAL: Don't let LR drop below 10% of base
 
   patience: 30                            # INCREASED - let model train longer

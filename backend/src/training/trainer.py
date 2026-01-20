@@ -269,7 +269,18 @@ class XR2TextTrainer:
         self.optimizer = self._create_optimizer()
 
         # Initialize scheduler
-        total_steps = len(train_loader) * self.epochs // self.gradient_accumulation_steps
+        # FIX: Use FULL dataset size for total_steps calculation, not curriculum-filtered size
+        # This prevents LR from decaying too fast when curriculum starts with small subsets
+        # The scheduler should be based on the maximum number of steps across all epochs
+        if self.use_curriculum and hasattr(self, 'base_train_dataset'):
+            # Calculate based on full dataset (hard stage uses all samples)
+            full_dataset_size = len(self.base_train_dataset)
+            steps_per_epoch = full_dataset_size // self.train_batch_size
+        else:
+            steps_per_epoch = len(train_loader)
+        total_steps = steps_per_epoch * self.epochs // self.gradient_accumulation_steps
+        logger.info(f"Scheduler initialized with total_steps={total_steps} (steps_per_epoch={steps_per_epoch})")
+
         self.scheduler = get_scheduler(
             self.optimizer,
             scheduler_type=config.get("scheduler", "cosine"),
